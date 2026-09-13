@@ -278,6 +278,100 @@ func TestReadinessExplainsShippingDeadEnds(t *testing.T) {
 	}
 }
 
+func TestDeliveryUnreadAndAnnouncementSummary(t *testing.T) {
+	db, err := sql.Open("sqliteshim", filepath.Join(t.TempDir(), "delivery.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	notes := []notification{}
+	s, err := New(db, testToken, "https://test.example", "bot", t.TempDir(), map[string]string{"a": "A"}, func(user int64, text string) {
+		notes = append(notes, notification{user, text})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	game := decodeResponse[game](t, requestJSON(h, 10, "POST", "/games", map[string]any{"name": "Delivery"}), 200)
+	token := strings.Split(game.InviteURL, "startapp=")[1]
+	for id := int64(1); id <= 2; id++ {
+		decodeResponse[any](t, requestJSON(h, id, "PUT", "/me", map[string]any{"address": "Address", "location": "a", "destinations": []string{"a"}}), 200)
+		decodeResponse[any](t, requestJSON(h, id, "POST", "/invites/"+token+"/join", map[string]any{}), 200)
+	}
+	gamePath := fmt.Sprintf("/games/%d", game.ID)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", gamePath+"/draw", map[string]any{}), 200)
+	var threadKey string
+	if err := db.QueryRow(`SELECT thread FROM assignments WHERE game=? AND sender=1`, game.ID).Scan(&threadKey); err != nil {
+		t.Fatal(err)
+	}
+	trackingPath := "/threads/" + threadKey + "/tracking"
+	receivedPath := "/threads/" + threadKey + "/received"
+	decodeResponse[any](t, requestJSON(h, 2, "PUT", trackingPath, map[string]any{"tracking_number": "NO"}), 403)
+	decodeResponse[any](t, requestJSON(h, 1, "PUT", trackingPath, map[string]any{"tracking_number": "TRACK-1"}), 200)
+	decodeResponse[any](t, requestJSON(h, 1, "POST", receivedPath, map[string]any{"received": true}), 403)
+	decodeResponse[any](t, requestJSON(h, 2, "POST", receivedPath, map[string]any{"received": true}), 200)
+	decodeResponse[any](t, requestJSON(h, 1, "PUT", trackingPath, map[string]any{"tracking_number": "TRACK-2"}), 409)
+	decodeResponse[any](t, requestJSON(h, 2, "POST", receivedPath, map[string]any{"received": false}), 200)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", gamePath+"/reset", map[string]any{}), 200)
+	decodeResponse[any](t, requestJSON(h, 1, "PUT", trackingPath, map[string]any{"tracking_number": "TRACK-2"}), 200)
+	decodeResponse[any](t, requestJSON(h, 2, "POST", receivedPath, map[string]any{"received": true}), 200)
+	trackingNotice, receivedNotice, canceledNotice := false, false, false
+	for _, note := range notes {
+		trackingNotice = trackingNotice || note.user == 2 && strings.Contains(note.text, "TRACK-2")
+		receivedNotice = receivedNotice || note.user == 1 && strings.Contains(note.text, "подтвердил(а)")
+		canceledNotice = canceledNotice || note.user == 1 && strings.Contains(note.text, "отменил(а)")
+	}
+	if !trackingNotice || !receivedNotice || !canceledNotice {
+		t.Fatal("delivery notifications", notes)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(thread,game,round,sender,receiver,text) VALUES(?,?,?,?,?,?)`, threadKey, game.ID, 1, 1, 2, "Unread"); err != nil {
+		t.Fatal(err)
+	}
+	threads := decodeResponse[[]thread](t, requestJSON(h, 2, "GET", gamePath+"/threads", nil), 200)
+	var unread int
+	for _, item := range threads {
+		if item.Key == threadKey {
+			unread = item.UnreadCount
+			if item.TrackingNumber != "TRACK-2" || !item.Received {
+				t.Fatal("delivery state", item)
+			}
+		}
+	}
+	if unread != 1 {
+		t.Fatal("unread thread", threads)
+	}
+	for _, item := range decodeResponse[[]thread](t, requestJSON(h, 1, "GET", gamePath+"/threads", nil), 200) {
+		if item.Key == threadKey && item.UnreadCount != 0 {
+			t.Fatal("own message counted unread", item)
+		}
+	}
+	decodeResponse[[]message](t, requestJSON(h, 2, "GET", "/threads/"+threadKey+"/messages", nil), 200)
+	threads = decodeResponse[[]thread](t, requestJSON(h, 2, "GET", gamePath+"/threads", nil), 200)
+	for _, item := range threads {
+		if item.Key == threadKey && item.UnreadCount != 0 {
+			t.Fatal("thread remained unread", item)
+		}
+	}
+	decodeResponse[any](t, requestJSON(h, 10, "POST", gamePath+"/announcements", map[string]any{"text": "Important news"}), 200)
+	summary := decodeResponse[announcementSummary](t, requestJSON(h, 2, "GET", gamePath+"/announcements/latest", nil), 200)
+	if summary.UnreadCount != 1 || summary.Latest == nil || summary.Latest.Text != "Important news" {
+		t.Fatal(summary)
+	}
+	ownerSummary := decodeResponse[announcementSummary](t, requestJSON(h, 10, "GET", gamePath+"/announcements/latest", nil), 200)
+	if ownerSummary.UnreadCount != 0 {
+		t.Fatal("own announcement counted unread", ownerSummary)
+	}
+	summary = decodeResponse[announcementSummary](t, requestJSON(h, 2, "GET", gamePath+"/announcements/latest", nil), 200)
+	if summary.UnreadCount != 1 {
+		t.Fatal("summary marked announcement read", summary)
+	}
+	decodeResponse[[]message](t, requestJSON(h, 2, "GET", gamePath+"/announcements", nil), 200)
+	summary = decodeResponse[announcementSummary](t, requestJSON(h, 2, "GET", gamePath+"/announcements/latest", nil), 200)
+	if summary.UnreadCount != 0 {
+		t.Fatal("announcement remained unread", summary)
+	}
+}
+
 func TestForceDrawAndUploadValidation(t *testing.T) {
 	db, err := sql.Open("sqliteshim", filepath.Join(t.TempDir(), "force.db"))
 	if err != nil {

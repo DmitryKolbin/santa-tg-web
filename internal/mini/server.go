@@ -89,7 +89,9 @@ func (s *Server) Handler() http.Handler {
 		"POST /api/games/{id}/reset": resetGame, "GET /api/games/{id}/receiver": getReceiver,
 		"GET /api/games/{id}/threads":        listThreads,
 		"GET /api/threads/{thread}/messages": listMessages, "POST /api/threads/{thread}/messages": sendMessage,
-		"GET /api/games/{id}/announcements": listAnnouncements, "POST /api/games/{id}/announcements": announce,
+		"PUT /api/threads/{thread}/tracking": saveTracking, "POST /api/threads/{thread}/received": setReceived,
+		"GET /api/games/{id}/announcements/latest": latestAnnouncement,
+		"GET /api/games/{id}/announcements":        listAnnouncements, "POST /api/games/{id}/announcements": announce,
 		"GET /api/files/{key}": getFile,
 	}
 	for pattern, handler := range routes {

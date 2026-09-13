@@ -1,6 +1,8 @@
 package mini
 
 import (
+	"database/sql"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -19,6 +21,9 @@ type thread struct {
 	Receiver        int64  `json:"-"`
 	Side            string `json:"side"`
 	CounterpartName string `json:"counterpart_name,omitempty"`
+	TrackingNumber  string `json:"tracking_number"`
+	Received        bool   `json:"received"`
+	UnreadCount     int    `json:"unread_count"`
 	ReadOnly        bool   `json:"read_only"`
 }
 
@@ -26,7 +31,7 @@ func (q *request) thread() (thread, error) {
 	var t thread
 	var round int
 	var started bool
-	err := q.tx.QueryRowContext(q.r.Context(), `SELECT a.thread,a.game,a.round,a.sender,a.receiver,g.round,g.started FROM assignments a JOIN games g ON g.id=a.game WHERE a.thread=?`, q.r.PathValue("thread")).Scan(&t.Key, &t.Game, &t.Round, &t.Sender, &t.Receiver, &round, &started)
+	err := q.tx.QueryRowContext(q.r.Context(), `SELECT a.thread,a.game,g.name,a.round,a.sender,a.receiver,g.round,g.started FROM assignments a JOIN games g ON g.id=a.game WHERE a.thread=?`, q.r.PathValue("thread")).Scan(&t.Key, &t.Game, &t.GameName, &t.Round, &t.Sender, &t.Receiver, &round, &started)
 	if err != nil {
 		return t, err
 	}
@@ -41,7 +46,7 @@ func listThreads(q *request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := q.tx.QueryContext(q.r.Context(), `SELECT a.thread,a.round,a.sender,a.receiver,u.name FROM assignments a JOIN users u ON u.id=a.receiver WHERE a.game=? AND (a.sender=? OR a.receiver=?) ORDER BY a.round DESC,a.thread`, g.ID, q.user, q.user)
+	rows, err := q.tx.QueryContext(q.r.Context(), `SELECT a.thread,a.round,a.sender,a.receiver,u.name,COALESCE(d.tracking_number,''),COALESCE(d.received,0),(SELECT count(*) FROM messages m WHERE m.thread=a.thread AND m.receiver=? AND m.id>COALESCE((SELECT message FROM message_reads r WHERE r.person=? AND r.game=a.game AND r.thread=a.thread),0)) FROM assignments a JOIN users u ON u.id=a.receiver LEFT JOIN deliveries d ON d.thread=a.thread WHERE a.game=? AND (a.sender=? OR a.receiver=?) ORDER BY a.round DESC,a.thread`, q.user, q.user, g.ID, q.user, q.user)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +55,7 @@ func listThreads(q *request) (any, error) {
 	for rows.Next() {
 		var t thread
 		var receiverName string
-		if err := rows.Scan(&t.Key, &t.Round, &t.Sender, &t.Receiver, &receiverName); err != nil {
+		if err := rows.Scan(&t.Key, &t.Round, &t.Sender, &t.Receiver, &receiverName, &t.TrackingNumber, &t.Received, &t.UnreadCount); err != nil {
 			return nil, err
 		}
 		t.GameName = g.Name
@@ -75,7 +80,7 @@ type message struct {
 	Created  string `json:"created"`
 }
 
-func (q *request) messages(where string, args ...any) (any, error) {
+func (q *request) messages(game int64, thread, where string, args ...any) (any, error) {
 	after := int64(0)
 	if raw := q.r.URL.Query().Get("after"); raw != "" {
 		var err error
@@ -90,7 +95,6 @@ func (q *request) messages(where string, args ...any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	result := []message{}
 	for rows.Next() {
 		var m message
@@ -99,21 +103,54 @@ func (q *request) messages(where string, args ...any) (any, error) {
 		}
 		result = append(result, m)
 	}
-	return result, rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(result) > 0 {
+		if err := q.exec(`INSERT INTO message_reads(person,game,thread,message) VALUES(?,?,?,?) ON CONFLICT(person,game,thread) DO UPDATE SET message=max(message,excluded.message)`, q.user, game, thread, result[len(result)-1].ID); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 func listMessages(q *request) (any, error) {
 	t, err := q.thread()
 	if err != nil {
 		return nil, err
 	}
-	return q.messages(`thread=?`, t.Key)
+	return q.messages(t.Game, t.Key, `thread=?`, t.Key)
 }
 func listAnnouncements(q *request) (any, error) {
 	g, err := q.game()
 	if err != nil {
 		return nil, err
 	}
-	return q.messages(`game=? AND thread IS NULL`, g.ID)
+	return q.messages(g.ID, "", `game=? AND thread IS NULL`, g.ID)
+}
+
+type announcementSummary struct {
+	Latest      *message `json:"latest,omitempty"`
+	UnreadCount int      `json:"unread_count"`
+}
+
+func latestAnnouncement(q *request) (any, error) {
+	g, err := q.game()
+	if err != nil {
+		return nil, err
+	}
+	summary := announcementSummary{}
+	var latest message
+	err = q.tx.QueryRowContext(q.r.Context(), `SELECT id,text,sender=?,file_key,file_name,file_type,created FROM messages WHERE game=? AND thread IS NULL ORDER BY id DESC LIMIT 1`, q.user, g.ID).Scan(&latest.ID, &latest.Text, &latest.Mine, &latest.FileKey, &latest.FileName, &latest.FileType, &latest.Created)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if err == nil {
+		summary.Latest = &latest
+	}
+	err = q.tx.QueryRowContext(q.r.Context(), `SELECT count(*) FROM messages WHERE game=? AND thread IS NULL AND sender<>? AND id>COALESCE((SELECT message FROM message_reads WHERE person=? AND game=? AND thread=''),0)`, g.ID, q.user, q.user, g.ID).Scan(&summary.UnreadCount)
+	return summary, err
 }
 func announce(q *request) (any, error) {
 	g, err := q.game()
@@ -227,6 +264,85 @@ func sendMessage(q *request) (any, error) {
 	q.message(receiver, "Новое сообщение в Secret Santa. Откройте приложение, чтобы прочитать.")
 	return nil, nil
 }
+
+func saveTracking(q *request) (any, error) {
+	t, err := q.thread()
+	if err != nil {
+		return nil, err
+	}
+	if q.user != t.Sender {
+		return nil, forbidden()
+	}
+	var input struct {
+		TrackingNumber string `json:"tracking_number"`
+	}
+	if err := q.decode(&input); err != nil {
+		return nil, err
+	}
+	tracking, err := checkedText(input.TrackingNumber, 200)
+	if err != nil {
+		return nil, err
+	}
+	old := ""
+	received := false
+	err = q.tx.QueryRowContext(q.r.Context(), `SELECT tracking_number,received FROM deliveries WHERE thread=?`, t.Key).Scan(&old, &received)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if received {
+		return nil, apiError{409, "Получатель уже подтвердил получение подарка"}
+	}
+	if old == tracking {
+		return map[string]any{"tracking_number": tracking, "received": false}, nil
+	}
+	if err := q.exec(`INSERT INTO deliveries(thread,tracking_number) VALUES(?,?) ON CONFLICT(thread) DO UPDATE SET tracking_number=excluded.tracking_number`, t.Key, tracking); err != nil {
+		return nil, err
+	}
+	verb := "добавил"
+	if old != "" {
+		verb = "изменил"
+	}
+	q.message(t.Receiver, fmt.Sprintf("Ваш Тайный Санта %s трек-номер подарка в игре «%s»: %s", verb, t.GameName, tracking))
+	return map[string]any{"tracking_number": tracking, "received": false}, nil
+}
+
+func setReceived(q *request) (any, error) {
+	t, err := q.thread()
+	if err != nil {
+		return nil, err
+	}
+	if q.user != t.Receiver {
+		return nil, forbidden()
+	}
+	var input struct {
+		Received bool `json:"received"`
+	}
+	if err := q.decode(&input); err != nil {
+		return nil, err
+	}
+	current := false
+	err = q.tx.QueryRowContext(q.r.Context(), `SELECT received FROM deliveries WHERE thread=?`, t.Key).Scan(&current)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if current == input.Received {
+		return map[string]bool{"received": current}, nil
+	}
+	if err := q.exec(`INSERT INTO deliveries(thread,received) VALUES(?,?) ON CONFLICT(thread) DO UPDATE SET received=excluded.received`, t.Key, input.Received); err != nil {
+		return nil, err
+	}
+	receiver, err := q.profile(q.user)
+	if err != nil {
+		return nil, err
+	}
+	text := receiver.Name + " подтвердил(а) получение подарка в игре «" + t.GameName + "»."
+	if !input.Received {
+		text = receiver.Name + " отменил(а) подтверждение получения подарка в игре «" + t.GameName + "»."
+	}
+	q.message(t.Sender, text)
+	return map[string]bool{"received": input.Received}, nil
+}
+
 func getFile(q *request) (any, error) {
 	key := q.r.PathValue("key")
 	var file download

@@ -46,3 +46,16 @@ CREATE TABLE IF NOT EXISTS messages (
  created TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS messages_game ON messages(game, id);
+CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread, id);
+CREATE TABLE IF NOT EXISTS deliveries (
+ thread TEXT PRIMARY KEY REFERENCES assignments(thread),
+ tracking_number TEXT NOT NULL DEFAULT '',
+ received INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS message_reads (
+ person INTEGER NOT NULL REFERENCES users(id),
+ game INTEGER NOT NULL REFERENCES games(id),
+ thread TEXT NOT NULL,
+ message INTEGER NOT NULL,
+ PRIMARY KEY(person, game, thread)
+);
