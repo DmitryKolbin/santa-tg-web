@@ -139,7 +139,7 @@ func TestMiniAppFlow(t *testing.T) {
 	}
 	decodeResponse[any](t, requestJSON(h, 7, "PATCH", path, map[string]any{"single_cycle": true}), 200)
 	report = decodeResponse[readinessResult](t, requestJSON(h, 7, "POST", path+"/readiness", map[string]any{}), 200)
-	if report.Ready {
+	if report.Ready || len(report.Problems) == 0 {
 		t.Fatal("disconnected graph accepted for single cycle")
 	}
 	decodeResponse[any](t, requestJSON(h, 7, "PATCH", path, map[string]any{"single_cycle": false}), 200)
@@ -174,8 +174,16 @@ func TestMiniAppFlow(t *testing.T) {
 	}
 	var key string
 	for _, th := range threads {
+		if th.GameName != "Winter" {
+			t.Fatal("missing game name", th)
+		}
 		if th.Side == "receiver" {
 			key = th.Key
+			if th.CounterpartName != fmt.Sprintf("User %d", receiver) {
+				t.Fatal("missing receiver name", th)
+			}
+		} else if th.CounterpartName != "" {
+			t.Fatal("santa identity leaked", th)
 		}
 	}
 	threadPath := "/threads/" + key + "/messages"
@@ -239,6 +247,34 @@ func TestMiniAppFlow(t *testing.T) {
 	res = requestJSON(s2.Handler(), receiver, "GET", filePath, nil)
 	if res.Code != 200 || res.Body.String() != "hello gift" {
 		t.Fatal("file lost on restart")
+	}
+}
+
+func TestReadinessExplainsShippingDeadEnds(t *testing.T) {
+	db, err := sql.Open("sqliteshim", filepath.Join(t.TempDir(), "shipping.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s, err := New(db, testToken, "https://test.example", "bot", t.TempDir(), map[string]string{"a": "Локация A", "b": "Локация B"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	game := decodeResponse[game](t, requestJSON(h, 10, "POST", "/games", map[string]any{"name": "Shipping"}), 200)
+	token := strings.Split(game.InviteURL, "startapp=")[1]
+	for id := int64(1); id <= 3; id++ {
+		location := "a"
+		if id == 3 {
+			location = "b"
+		}
+		decodeResponse[any](t, requestJSON(h, id, "PUT", "/me", map[string]any{"address": "Address", "location": location, "destinations": []string{location}}), 200)
+		decodeResponse[any](t, requestJSON(h, id, "POST", "/invites/"+token+"/join", map[string]any{}), 200)
+	}
+	report := decodeResponse[readinessResult](t, requestJSON(h, 10, "POST", fmt.Sprintf("/games/%d/readiness", game.ID), map[string]any{}), 200)
+	problems := strings.Join(report.Problems, " ")
+	if report.Ready || !strings.Contains(problems, "User 3") || !strings.Contains(problems, "Локация B") {
+		t.Fatal(report)
 	}
 }
 

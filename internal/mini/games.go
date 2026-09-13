@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
+	"strings"
 
 	"github.com/DmitryKolbin/santa-tg-web/internal/santa"
 	"github.com/DmitryKolbin/santa-tg-web/internal/santa/services"
@@ -152,6 +154,7 @@ type readinessResult struct {
 	Exclusions string            `json:"exclusions"`
 	Members    []memberReadiness `json:"members"`
 	Excluded   []string          `json:"excluded"`
+	Problems   []string          `json:"problems"`
 	Ready      bool              `json:"ready"`
 	Error      string            `json:"error,omitempty"`
 }
@@ -162,7 +165,7 @@ type memberReadiness struct {
 }
 
 func (q *request) prepare(g game, force bool) (readinessResult, []profile, []int, error) {
-	report := readinessResult{Members: []memberReadiness{}, Excluded: []string{}}
+	report := readinessResult{Members: []memberReadiness{}, Excluded: []string{}, Problems: []string{}}
 	rows, err := q.tx.QueryContext(q.r.Context(), `SELECT person FROM members WHERE game=? ORDER BY person`, g.ID)
 	if err != nil {
 		return report, nil, nil, err
@@ -208,6 +211,7 @@ func (q *request) prepare(g game, force bool) (readinessResult, []profile, []int
 	}
 	if len(players) == 2 && !g.AllowMutualPairs {
 		report.Error = "При запрете взаимных пар нужно минимум три участника"
+		report.Problems = append(report.Problems, "Разрешите взаимные пары или добавьте ещё одного участника.")
 		return report, players, nil, nil
 	}
 	graph := santa.Graph{PersonCount: int64(len(players)), Edges: make([]bool, len(players)*len(players))}
@@ -227,6 +231,18 @@ func (q *request) prepare(g game, force bool) (readinessResult, []profile, []int
 	assignments, err := services.FindAssignments(q.r.Context(), graph, g.SingleCycle, g.AllowMutualPairs)
 	if errors.Is(err, services.ErrNoAssignment) {
 		report.Error = "Нет распределения с выбранными настройками и направлениями доставки"
+		if _, relaxedErr := services.FindAssignments(q.r.Context(), graph, false, true); relaxedErr == nil {
+			switch {
+			case g.SingleCycle && !g.AllowMutualPairs:
+				report.Problems = append(report.Problems, "Доставка возможна, но текущий состав не позволяет одновременно собрать одну цепочку и запретить взаимные пары. Ослабьте одно из правил.")
+			case g.SingleCycle:
+				report.Problems = append(report.Problems, "Доставка возможна только в нескольких цепочках. Отключите правило «Только одна цепочка».")
+			case !g.AllowMutualPairs:
+				report.Problems = append(report.Problems, "Доставка возможна только с взаимными парами. Включите правило «Разрешить взаимные пары».")
+			}
+		} else {
+			q.shippingProblems(&report, players, graph)
+		}
 		return report, players, nil, nil
 	}
 	if err != nil {
@@ -234,6 +250,44 @@ func (q *request) prepare(g game, force bool) (readinessResult, []profile, []int
 	}
 	report.Ready = true
 	return report, players, assignments, nil
+}
+
+func (q *request) shippingProblems(report *readinessResult, players []profile, graph santa.Graph) {
+	for from, player := range players {
+		hasReceiver := false
+		for to := range players {
+			hasReceiver = hasReceiver || graph.HasEdge(int64(from), int64(to))
+		}
+		if !hasReceiver {
+			destinations := make([]string, 0, len(player.Destinations))
+			for _, code := range player.Destinations {
+				destinations = append(destinations, q.s.locations[code])
+			}
+			report.Problems = append(report.Problems, fmt.Sprintf("%s не может никому отправить подарок: среди участников нет получателей из выбранных направлений (%s).", player.Name, strings.Join(destinations, ", ")))
+		}
+	}
+	blocked := map[string][]string{}
+	for to, player := range players {
+		hasSanta := false
+		for from := range players {
+			hasSanta = hasSanta || graph.HasEdge(int64(from), int64(to))
+		}
+		if !hasSanta {
+			blocked[player.Location] = append(blocked[player.Location], player.Name)
+		}
+	}
+	codes := make([]string, 0, len(blocked))
+	for code := range blocked {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	for _, code := range codes {
+		names := blocked[code]
+		report.Problems = append(report.Problems, fmt.Sprintf("Никто не может отправить подарок участникам из локации «%s»: %s.", q.s.locations[code], strings.Join(names, ", ")))
+	}
+	if len(report.Problems) == 0 {
+		report.Problems = append(report.Problems, "Направления доставки нескольких участников конфликтуют между собой. Расширьте доступные направления отправки.")
+	}
 }
 
 type drawOptions struct {

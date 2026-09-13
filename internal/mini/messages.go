@@ -11,13 +11,15 @@ import (
 )
 
 type thread struct {
-	Key      string `json:"key"`
-	Game     int64  `json:"-"`
-	Round    int    `json:"round"`
-	Sender   int64  `json:"-"`
-	Receiver int64  `json:"-"`
-	Side     string `json:"side"`
-	ReadOnly bool   `json:"read_only"`
+	Key             string `json:"key"`
+	Game            int64  `json:"-"`
+	GameName        string `json:"game_name,omitempty"`
+	Round           int    `json:"round"`
+	Sender          int64  `json:"-"`
+	Receiver        int64  `json:"-"`
+	Side            string `json:"side"`
+	CounterpartName string `json:"counterpart_name,omitempty"`
+	ReadOnly        bool   `json:"read_only"`
 }
 
 func (q *request) thread() (thread, error) {
@@ -39,7 +41,7 @@ func listThreads(q *request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := q.tx.QueryContext(q.r.Context(), `SELECT thread,round,sender FROM assignments WHERE game=? AND (sender=? OR receiver=?) ORDER BY round DESC,thread`, g.ID, q.user, q.user)
+	rows, err := q.tx.QueryContext(q.r.Context(), `SELECT a.thread,a.round,a.sender,a.receiver,u.name FROM assignments a JOIN users u ON u.id=a.receiver WHERE a.game=? AND (a.sender=? OR a.receiver=?) ORDER BY a.round DESC,a.thread`, g.ID, q.user, q.user)
 	if err != nil {
 		return nil, err
 	}
@@ -47,12 +49,15 @@ func listThreads(q *request) (any, error) {
 	result := []thread{}
 	for rows.Next() {
 		var t thread
-		if err := rows.Scan(&t.Key, &t.Round, &t.Sender); err != nil {
+		var receiverName string
+		if err := rows.Scan(&t.Key, &t.Round, &t.Sender, &t.Receiver, &receiverName); err != nil {
 			return nil, err
 		}
+		t.GameName = g.Name
 		t.Side = "santa"
 		if t.Sender == q.user {
 			t.Side = "receiver"
+			t.CounterpartName = receiverName
 		}
 		t.ReadOnly = !g.Started || t.Round != g.Round
 		result = append(result, t)
