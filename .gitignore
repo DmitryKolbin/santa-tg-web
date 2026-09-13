@@ -1,0 +1,8 @@
+vendor/
+uploads/
+*.db
+*.db-*
+.env
+.envrc
+.DS_Store
+.idea/

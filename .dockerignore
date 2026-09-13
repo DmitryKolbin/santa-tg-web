@@ -1,0 +1,9 @@
+.git
+vendor
+*.db
+*.db-*
+uploads
+.env
+.envrc
+.idea
+.DS_Store
