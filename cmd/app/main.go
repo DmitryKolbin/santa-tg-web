@@ -26,8 +26,8 @@ func env(key, fallback string) string {
 func run() error {
 	token, appURL := os.Getenv("TELEGRAM_BOT_TOKEN"), os.Getenv("APP_URL")
 	parsed, err := url.Parse(appURL)
-	if token == "" || err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return errors.New("set TELEGRAM_BOT_TOKEN and a public HTTPS root APP_URL")
+	if token == "" || err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("set TELEGRAM_BOT_TOKEN and a public HTTPS APP_URL")
 	}
 	locationsData, err := os.ReadFile(env("LOCATIONS_PATH", "locations.json"))
 	if err != nil {
