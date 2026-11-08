@@ -13,7 +13,12 @@ import (
 	"syscall"
 	"time"
 
+	appdb "github.com/DmitryKolbin/santa-tg-web/internal/database"
 	"github.com/DmitryKolbin/santa-tg-web/internal/mini"
+	"github.com/DmitryKolbin/santa-tg-web/internal/santa/controllers"
+	"github.com/DmitryKolbin/santa-tg-web/internal/santa/httpapi"
+	"github.com/DmitryKolbin/santa-tg-web/internal/santa/repos"
+	"github.com/DmitryKolbin/santa-tg-web/internal/santa/services"
 	_ "github.com/uptrace/bun/driver/sqliteshim"
 )
 
@@ -45,6 +50,14 @@ func run() error {
 		return err
 	}
 	defer db.Close()
+	bunDB := appdb.New(db)
+	if err := appdb.Migrate(context.Background(), bunDB); err != nil {
+		return err
+	}
+	uploads := env("UPLOADS_PATH", "uploads")
+	if err := os.MkdirAll(uploads, 0700); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	bot := mini.NewBot(token, appURL)
@@ -52,11 +65,37 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	app, err := mini.New(db, token, appURL, name, env("UPLOADS_PATH", "uploads"), locations, bot.Notify)
-	if err != nil {
-		return err
+	store := repos.New(bunDB)
+	meService := services.NewMeService(store, locations, bot)
+	locationService := services.NewLocationService(store, locations)
+	gameService := services.NewGameService(store, name, locations, bot)
+	inviteService := services.NewInviteService(store)
+	threadService := services.NewThreadService(store, uploads, bot)
+	fileService := services.NewFileService(store, uploads)
+	api := httpapi.New(token)
+	mux := http.NewServeMux()
+	routeControllers := []controllers.Controller{
+		controllers.NewMeController(api, meService),
+		controllers.NewLocationsController(api, locationService),
+		controllers.NewGamesController(api, gameService),
+		controllers.NewInvitesController(api, inviteService),
+		controllers.NewThreadsController(api, threadService),
+		controllers.NewFilesController(api, fileService),
 	}
-	server := &http.Server{Addr: env("HTTP_ADDR", ":8080"), Handler: app.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	for _, controller := range routeControllers {
+		controller.RegisterRoutes(mux)
+	}
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		pingCtx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if err := bunDB.PingContext(pingCtx); err != nil {
+			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "Not found", http.StatusNotFound) })
+	server := &http.Server{Addr: env("HTTP_ADDR", ":8080"), Handler: httpapi.Security(appURL, mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	go bot.Run(ctx)
 	go func() {
 		<-ctx.Done()

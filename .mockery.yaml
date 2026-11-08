@@ -1,0 +1,27 @@
+disable-version-string: true
+with-expecter: true
+resolve-type-alias: false
+issue-845-fix: true
+mockname: "{{.InterfaceName}}"
+filename: "{{.MockName}}.go"
+dir: mocks/{{ replaceAll .InterfaceDirRelative "internal" "internal_" }}
+packages:
+  github.com/DmitryKolbin/santa-tg-web/internal/mini:
+    interfaces:
+      HTTPClient:
+  github.com/DmitryKolbin/santa-tg-web/internal/santa/services:
+    interfaces:
+      Notifier:
+      MeService:
+      LocationService:
+      GameService:
+      InviteService:
+      ThreadService:
+      FileService:
+  github.com/DmitryKolbin/santa-tg-web/internal/santa/repos:
+    interfaces:
+      GameRepo:
+      UserRepo:
+      MessageRepo:
+      ImportRepo:
+      UnitOfWork:

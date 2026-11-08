@@ -13,13 +13,27 @@ import (
 
 type Bot struct {
 	token, appURL string
-	client        *http.Client
+	client        HTTPClient
 	queue         chan notification
 }
 
-func NewBot(token, appURL string) *Bot {
-	return &Bot{token: token, appURL: appURL, client: &http.Client{Timeout: 40 * time.Second}, queue: make(chan notification, 512)}
+type HTTPClient interface {
+	Do(*http.Request) (*http.Response, error)
 }
+
+type notification struct {
+	user int64
+	text string
+}
+
+func NewBot(token, appURL string) *Bot {
+	return NewBotWithClient(token, appURL, &http.Client{Timeout: 40 * time.Second})
+}
+
+func NewBotWithClient(token, appURL string, client HTTPClient) *Bot {
+	return &Bot{token: token, appURL: appURL, client: client, queue: make(chan notification, 512)}
+}
+
 func (b *Bot) call(ctx context.Context, method string, input, output any) error {
 	payload, err := json.Marshal(input)
 	if err != nil {
