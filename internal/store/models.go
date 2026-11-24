@@ -23,6 +23,7 @@ type Game struct {
 	SingleCycle      bool   `bun:"single_cycle,notnull"`
 	AllowMutualPairs bool   `bun:"allow_mutual_pairs,notnull"`
 	Started          bool   `bun:"started,notnull"`
+	Finished         bool   `bun:"finished,notnull"`
 	Round            int    `bun:"round,notnull"`
 }
 

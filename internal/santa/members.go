@@ -53,9 +53,9 @@ func (s *Service) Members(ctx context.Context, actor Actor, id int64) ([]GameMem
 	return result, nil
 }
 
-// editableGame loads a game the actor created whose draw has not happened yet.
+// editableGame loads an active game the actor created whose draw has not happened yet.
 func editableGame(ctx context.Context, db *store.Store, actor, id int64) (store.GameView, error) {
-	g, err := ownedGame(ctx, db, actor, id)
+	g, err := activeGame(ctx, db, actor, id)
 	if err == nil && g.Started {
 		return g, conflict("Сначала сбросьте жеребьёвку")
 	}

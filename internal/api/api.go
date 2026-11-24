@@ -49,6 +49,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/games/{id}/readiness", s.json(s.readiness))
 	mux.Handle("POST /api/games/{id}/draw", s.json(s.draw))
 	mux.Handle("POST /api/games/{id}/reset", s.json(s.resetGame))
+	mux.Handle("POST /api/games/{id}/finish", s.json(s.finishGame))
+	mux.Handle("POST /api/games/{id}/reopen", s.json(s.reopenGame))
 	mux.Handle("GET /api/games/{id}/receiver", s.json(s.receiver))
 	mux.Handle("GET /api/games/{id}/announcements/latest", s.json(s.latestAnnouncement))
 	mux.Handle("GET /api/games/{id}/announcements", s.json(s.announcements))

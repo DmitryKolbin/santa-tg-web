@@ -39,6 +39,17 @@ func init() {
 		},
 		Down: func(ctx context.Context, db *bun.DB) error { return nil },
 	})
+	migrations.Add(migrate.Migration{
+		Name: "20261125000000",
+		Up: func(ctx context.Context, db *bun.DB) error {
+			return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+				// A finished game is archived: chats keep working, the setup is frozen.
+				_, err := tx.ExecContext(ctx, "ALTER TABLE games ADD COLUMN finished INTEGER NOT NULL DEFAULT 0")
+				return err
+			})
+		},
+		Down: func(ctx context.Context, db *bun.DB) error { return nil },
+	})
 }
 
 // drawRulesSchema adds sender→receiver pairs the draw must not assign.

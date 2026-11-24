@@ -81,6 +81,7 @@ var _ = Describe("API", func() {
 	It("assigns only drawn members when an excluded member sorts first", func() { testForceDrawSkipsExcludedMembers(GinkgoT()) })
 	It("respects and explains blocked pairs", func() { testBlockedPairs(GinkgoT()) })
 	It("removes members and reports missing questionnaires", func() { testRemoveMemberAndMissing(GinkgoT()) })
+	It("archives finished games and keeps their chats working", func() { testFinishAndReopen(GinkgoT()) })
 })
 
 func signed(id int64, stamp int64) string {
@@ -604,4 +605,73 @@ func testRemoveMemberAndMissing(t FullGinkgoTInterface) {
 	ready := decodeResponse[readinessResult](t, requestJSON(h, 10, "POST", path+"/readiness", map[string]any{}), 200)
 	Expect(ready.Ready).To(BeTrue(), "report: %#v", ready)
 	Expect(ready.Members).To(HaveLen(2))
+}
+
+func testFinishAndReopen(t FullGinkgoTInterface) {
+	db, err := sql.Open("sqliteshim", filepath.Join(t.TempDir(), "finish.db"))
+	Expect(err).NotTo(HaveOccurred())
+	defer db.Close()
+	var mu sync.Mutex
+	var notes []notification
+	notifier := notifierFunc(func(user int64, text string) {
+		mu.Lock()
+		defer mu.Unlock()
+		notes = append(notes, notification{user, text})
+	})
+	s, err := New(db, testToken, "https://test.example", "bot", t.TempDir(), map[string]string{"a": "A"}, notifier)
+	Expect(err).NotTo(HaveOccurred())
+	h := s.Handler()
+	g := decodeResponse[game](t, requestJSON(h, 10, "POST", "/games", map[string]any{"name": "Finish"}), 200)
+	token := strings.Split(g.InviteURL, "startapp=")[1]
+	path := fmt.Sprintf("/games/%d", g.ID)
+	for id := int64(1); id <= 3; id++ {
+		decodeResponse[any](t, requestJSON(h, id, "PUT", "/me", map[string]any{"address": "Address", "location": "a", "destinations": []string{"a"}}), 200)
+		decodeResponse[any](t, requestJSON(h, id, "POST", "/invites/"+token+"/join", map[string]any{}), 200)
+	}
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/draw", map[string]any{}), 200)
+
+	decodeResponse[any](t, requestJSON(h, 1, "POST", path+"/finish", map[string]any{}), 403)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/reopen", map[string]any{}), 409)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/finish", map[string]any{}), 200)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/finish", map[string]any{}), 409)
+	Expect(decodeResponse[game](t, requestJSON(h, 1, "GET", path, nil), 200).Finished).To(BeTrue())
+	Expect(decodeResponse[[]game](t, requestJSON(h, 1, "GET", "/games", nil), 200)[0].Finished).To(BeTrue())
+	Expect(decodeResponse[santa.Invite](t, requestJSON(h, 4, "GET", "/invites/"+token, nil), 200).Finished).To(BeTrue())
+	Eventually(func() []notification {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]notification(nil), notes...)
+	}, time.Second).Should(ContainElement(notification{2, "Организатор завершил игру «Finish». Она перенесена в архив."}))
+
+	// The setup is frozen.
+	decodeResponse[any](t, requestJSON(h, 4, "POST", "/invites/"+token+"/join", map[string]any{}), 409)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/reset", map[string]any{}), 409)
+	decodeResponse[any](t, requestJSON(h, 10, "PATCH", path, map[string]any{"name": "New"}), 409)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/readiness", map[string]any{}), 409)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/blocked", map[string]any{"sender": 1, "receiver": 2}), 409)
+	decodeResponse[any](t, requestJSON(h, 10, "DELETE", path+"/members/1", nil), 409)
+
+	// Chats, deliveries and announcements keep working.
+	var key string
+	Expect(db.QueryRow(`SELECT thread FROM assignments WHERE game=? AND sender=1`, g.ID).Scan(&key)).To(Succeed())
+	threads := decodeResponse[[]thread](t, requestJSON(h, 1, "GET", path+"/threads", nil), 200)
+	for _, th := range threads {
+		Expect(th.ReadOnly).To(BeFalse())
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	writer.WriteField("text", "Still on its way")
+	writer.Close()
+	req := httptest.NewRequest("POST", "http://test/api/threads/"+key+"/messages", &body)
+	req.Header.Set("Authorization", "tma "+signed(1, time.Now().Unix()))
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, req)
+	decodeResponse[any](t, res, 200)
+	decodeResponse[any](t, requestJSON(h, 1, "PUT", "/threads/"+key+"/tracking", map[string]any{"tracking_number": "TRACK"}), 200)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/announcements", map[string]any{"text": "Thanks everyone"}), 200)
+
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/reopen", map[string]any{}), 200)
+	Expect(decodeResponse[game](t, requestJSON(h, 1, "GET", path, nil), 200).Finished).To(BeFalse())
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/reset", map[string]any{}), 200)
 }
