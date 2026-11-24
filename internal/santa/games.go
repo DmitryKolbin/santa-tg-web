@@ -17,6 +17,7 @@ type Game struct {
 	SingleCycle      bool   `json:"single_cycle"`
 	AllowMutualPairs bool   `json:"allow_mutual_pairs"`
 	Started          bool   `json:"started"`
+	Finished         bool   `json:"finished"`
 	Round            int    `json:"round"`
 	IsOwner          bool   `json:"is_owner"`
 	IsMember         bool   `json:"is_member"`
@@ -45,11 +46,11 @@ type Receiver struct {
 }
 
 func (s *Service) toGame(v store.GameView, actor int64, missing []string) Game {
-	g := Game{ID: v.ID, Name: v.Name, CreatorName: v.CreatorName, SingleCycle: v.SingleCycle, AllowMutualPairs: v.AllowMutualPairs, Started: v.Started, Round: v.Round, IsOwner: v.CreatorID == actor, IsMember: v.IsMember, Count: v.MemberCount}
+	g := Game{ID: v.ID, Name: v.Name, CreatorName: v.CreatorName, SingleCycle: v.SingleCycle, AllowMutualPairs: v.AllowMutualPairs, Started: v.Started, Finished: v.Finished, Round: v.Round, IsOwner: v.CreatorID == actor, IsMember: v.IsMember, Count: v.MemberCount}
 	if g.IsOwner && s.botName != "" {
 		g.InviteURL = "https://t.me/" + s.botName + "?startapp=" + url.QueryEscape(v.Invite)
 	}
-	if g.IsMember && !g.Started && len(missing) > 0 {
+	if g.IsMember && !g.Started && !g.Finished && len(missing) > 0 {
 		g.Missing = missing
 	}
 	return g
@@ -60,6 +61,15 @@ func gameFor(ctx context.Context, db *store.Store, actor, id int64) (store.GameV
 	g, err := db.GameView(ctx, actor, id)
 	if err == nil && g.CreatorID != actor && !g.IsMember {
 		return g, forbidden()
+	}
+	return g, err
+}
+
+// activeGame loads a game the actor created that is not archived.
+func activeGame(ctx context.Context, db *store.Store, actor, id int64) (store.GameView, error) {
+	g, err := ownedGame(ctx, db, actor, id)
+	if err == nil && g.Finished {
+		return g, conflict("Игра завершена. Сначала верните её из архива.")
 	}
 	return g, err
 }
@@ -124,7 +134,7 @@ func (s *Service) CreateGame(ctx context.Context, actor Actor, input CreateGame)
 func (s *Service) UpdateGame(ctx context.Context, actor Actor, id int64, input UpdateGame) (Game, error) {
 	var result Game
 	err := s.write(ctx, func(tx *store.Store, _ *notes) error {
-		g, err := ownedGame(ctx, tx, actor.ID, id)
+		g, err := activeGame(ctx, tx, actor.ID, id)
 		if err != nil {
 			return err
 		}
@@ -156,7 +166,7 @@ func (s *Service) UpdateGame(ctx context.Context, actor Actor, id int64, input U
 // read-only because the game moves to the next round.
 func (s *Service) ResetGame(ctx context.Context, actor Actor, id int64) error {
 	return s.write(ctx, func(tx *store.Store, n *notes) error {
-		g, err := ownedGame(ctx, tx, actor.ID, id)
+		g, err := activeGame(ctx, tx, actor.ID, id)
 		if err != nil {
 			return err
 		}
@@ -167,6 +177,35 @@ func (s *Service) ResetGame(ctx context.Context, actor Actor, id int64) error {
 			return err
 		}
 		return notifyMembers(ctx, tx, n, g.ID, fmt.Sprintf("Жеребьёвка в игре «%s» сброшена. Прежние назначения больше не действуют.", g.Name))
+	})
+}
+
+// FinishGame moves the game to the archive of every member. Chats and
+// deliveries keep working; the draw setup is frozen until the game is reopened.
+func (s *Service) FinishGame(ctx context.Context, actor Actor, id int64) error {
+	return s.write(ctx, func(tx *store.Store, n *notes) error {
+		g, err := activeGame(ctx, tx, actor.ID, id)
+		if err != nil {
+			return err
+		}
+		if err := tx.UpdateGame(ctx, &store.Game{ID: g.ID, Finished: true}, "finished"); err != nil {
+			return err
+		}
+		return notifyMembers(ctx, tx, n, g.ID, fmt.Sprintf("Организатор завершил игру «%s». Она перенесена в архив.", g.Name))
+	})
+}
+
+// ReopenGame returns an archived game to the active list without notifying anyone.
+func (s *Service) ReopenGame(ctx context.Context, actor Actor, id int64) error {
+	return s.write(ctx, func(tx *store.Store, _ *notes) error {
+		g, err := ownedGame(ctx, tx, actor.ID, id)
+		if err != nil {
+			return err
+		}
+		if !g.Finished {
+			return conflict("Игра не в архиве")
+		}
+		return tx.UpdateGame(ctx, &store.Game{ID: g.ID, Finished: false}, "finished")
 	})
 }
 
@@ -191,6 +230,7 @@ type Invite struct {
 	Name        string `json:"name"`
 	CreatorName string `json:"creator_name"`
 	Started     bool   `json:"started"`
+	Finished    bool   `json:"finished"`
 	IsMember    bool   `json:"is_member"`
 }
 
@@ -200,7 +240,7 @@ type GameID struct {
 
 func (s *Service) Invite(ctx context.Context, actor Actor, token string) (Invite, error) {
 	g, err := s.store.GameViewByInvite(ctx, actor.ID, token)
-	return Invite{ID: g.ID, Name: g.Name, CreatorName: g.CreatorName, Started: g.Started, IsMember: g.IsMember}, err
+	return Invite{ID: g.ID, Name: g.Name, CreatorName: g.CreatorName, Started: g.Started, Finished: g.Finished, IsMember: g.IsMember}, err
 }
 
 func (s *Service) Join(ctx context.Context, actor Actor, token string) (GameID, error) {
@@ -213,6 +253,9 @@ func (s *Service) Join(ctx context.Context, actor Actor, token string) (GameID, 
 		result.ID = g.ID
 		if g.IsMember {
 			return nil
+		}
+		if g.Finished {
+			return conflict("Игра завершена")
 		}
 		if g.Started {
 			return conflict("Жеребьёвка уже прошла")

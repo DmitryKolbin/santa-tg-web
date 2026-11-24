@@ -52,7 +52,7 @@ type drawSnapshot struct {
 }
 
 func loadDrawSnapshot(ctx context.Context, db *store.Store, actor, id int64) (drawSnapshot, error) {
-	g, err := ownedGame(ctx, db, actor, id)
+	g, err := activeGame(ctx, db, actor, id)
 	if err != nil {
 		return drawSnapshot{}, err
 	}

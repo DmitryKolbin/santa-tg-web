@@ -249,3 +249,19 @@ func (s *Server) unblock(r *http.Request, actor santa.Actor) (any, error) {
 	}
 	return nil, s.svc.Unblock(r.Context(), actor, id, santa.BlockedPair{Sender: sender, Receiver: receiver})
 }
+
+func (s *Server) finishGame(r *http.Request, actor santa.Actor) (any, error) {
+	id, err := gameID(r)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.svc.FinishGame(r.Context(), actor, id)
+}
+
+func (s *Server) reopenGame(r *http.Request, actor santa.Actor) (any, error) {
+	id, err := gameID(r)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.svc.ReopenGame(r.Context(), actor, id)
+}
