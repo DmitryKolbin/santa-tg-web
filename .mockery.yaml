@@ -6,6 +6,6 @@ mockname: "{{.InterfaceName}}"
 filename: "{{.MockName}}.go"
 dir: mocks/{{ replaceAll .InterfaceDirRelative "internal" "internal_" }}
 packages:
-  github.com/DmitryKolbin/santa-tg-web/internal/mini:
+  github.com/DmitryKolbin/santa-tg-web/internal/telegram:
     interfaces:
       HTTPClient:

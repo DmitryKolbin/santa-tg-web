@@ -1,4 +1,4 @@
-package mini_test
+package telegram_test
 
 import (
 	"bytes"
@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DmitryKolbin/santa-tg-web/internal/mini"
-	minimocks "github.com/DmitryKolbin/santa-tg-web/mocks/internal_/mini"
+	"github.com/DmitryKolbin/santa-tg-web/internal/telegram"
+	telegrammocks "github.com/DmitryKolbin/santa-tg-web/mocks/internal_/telegram"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/mock"
@@ -31,7 +31,7 @@ func telegramResponse(status int, body string) *http.Response {
 
 var _ = Describe("Telegram bot", func() {
 	It("configures the Mini App and handles failed delivery", func() {
-		client := minimocks.NewHTTPClient(GinkgoT())
+		client := telegrammocks.NewHTTPClient(GinkgoT())
 		delivered := make(chan map[string]any, 1)
 		configured := map[string]bool{}
 		polls := 0
@@ -66,7 +66,7 @@ var _ = Describe("Telegram bot", func() {
 			}
 		})
 
-		bot := mini.NewBotWithClient(testToken, "https://app.example", client)
+		bot := telegram.NewBotWithClient(testToken, "https://app.example", client)
 		ctx, cancel := context.WithCancel(context.Background())
 		DeferCleanup(cancel)
 

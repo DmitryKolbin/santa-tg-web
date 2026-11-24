@@ -2,80 +2,74 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/DmitryKolbin/santa-tg-web/internal/api"
-	"github.com/DmitryKolbin/santa-tg-web/internal/mini"
+	"github.com/DmitryKolbin/santa-tg-web/internal/config"
 	"github.com/DmitryKolbin/santa-tg-web/internal/santa"
 	"github.com/DmitryKolbin/santa-tg-web/internal/store"
+	"github.com/DmitryKolbin/santa-tg-web/internal/telegram"
 )
 
-func env(key, fallback string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
+func main() {
+	if err := run(); err != nil {
+		slog.Error("startup failed", "error", err)
+		os.Exit(1)
 	}
-	return fallback
 }
+
 func run() error {
-	token, appURL := os.Getenv("TELEGRAM_BOT_TOKEN"), os.Getenv("APP_URL")
-	parsed, err := url.Parse(appURL)
-	if token == "" || err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("set TELEGRAM_BOT_TOKEN and a public HTTPS APP_URL")
-	}
-	locationsData, err := os.ReadFile(env("LOCATIONS_PATH", "locations.json"))
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	locations := map[string]string{}
-	if err := json.Unmarshal(locationsData, &locations); err != nil {
-		return err
-	}
-	if len(locations) == 0 {
-		return errors.New("locations cannot be empty")
-	}
-	db, err := store.Open(env("DB_PATH", "santa-mini.db"))
+	sqldb, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-	bunDB := store.New(db)
-	if err := store.Migrate(context.Background(), bunDB); err != nil {
+	defer sqldb.Close()
+	db := store.New(sqldb)
+	if err := store.Migrate(context.Background(), db); err != nil {
 		return err
 	}
-	uploads := env("UPLOADS_PATH", "uploads")
-	if err := os.MkdirAll(uploads, 0700); err != nil {
+	if err := os.MkdirAll(cfg.Uploads, 0700); err != nil {
 		return err
 	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	bot := mini.NewBot(token, appURL)
-	name, err := bot.Configure(ctx)
+	bot := telegram.NewBot(cfg.BotToken, cfg.AppURL)
+	botName, err := bot.Configure(ctx)
 	if err != nil {
 		return err
 	}
-	svc := santa.New(store.NewStore(bunDB), santa.Options{Uploads: uploads, BotName: name, Locations: locations, Notifier: bot})
-	server := &http.Server{Addr: env("HTTP_ADDR", ":8080"), Handler: api.New(svc, token, appURL), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	svc := santa.New(store.NewStore(db), santa.Options{Uploads: cfg.Uploads, BotName: botName, Locations: cfg.Locations, Notifier: bot})
+	server := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           api.New(svc, cfg.BotToken, cfg.AppURL),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 << 10,
+	}
+
 	botCtx, stopBot := context.WithCancel(context.Background())
 	defer stopBot()
 	go bot.Run(botCtx)
+
 	slog.Info("Secret Santa listening", "address", server.Addr)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.ListenAndServe() }()
 	select {
 	case err = <-serveErr:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -85,15 +79,9 @@ func run() error {
 		}
 		stopBot()
 		err = <-serveErr
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
 	}
-}
-func main() {
-	if err := run(); err != nil {
-		slog.Error("startup failed", "error", err)
-		os.Exit(1)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
 	}
+	return err
 }

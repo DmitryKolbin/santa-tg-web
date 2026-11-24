@@ -1,4 +1,4 @@
-package mini
+package telegram
 
 import (
 	"bytes"
