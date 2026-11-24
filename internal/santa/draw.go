@@ -48,6 +48,7 @@ type player struct {
 type drawSnapshot struct {
 	game    store.GameView
 	players []player
+	blocked []store.BlockedPair
 }
 
 func loadDrawSnapshot(ctx context.Context, db *store.Store, actor, id int64) (drawSnapshot, error) {
@@ -70,7 +71,11 @@ func loadDrawSnapshot(ctx context.Context, db *store.Store, actor, id int64) (dr
 		}
 		players = append(players, player{ID: u.ID, Name: u.Name, Address: u.Address, Wishlist: u.Wishlist, Location: u.Location, Destinations: []string(u.Destinations)})
 	}
-	return drawSnapshot{game: g, players: players}, nil
+	blocked, err := db.BlockedPairs(ctx, g.ID)
+	if err != nil {
+		return drawSnapshot{}, err
+	}
+	return drawSnapshot{game: g, players: players, blocked: blocked}, nil
 }
 
 func (s *Service) CheckReadiness(ctx context.Context, actor Actor, id int64, input DrawGame) (Readiness, error) {
@@ -144,11 +149,17 @@ func (s *Service) prepare(ctx context.Context, snapshot drawSnapshot, force bool
 		report.Problems = append(report.Problems, "Разрешите взаимные пары или добавьте ещё одного участника.")
 		return report, nil, nil
 	}
-	graph := shippingGraph(players)
+	shipping := shippingGraph(players)
+	graph := withoutBlocked(shipping, players, snapshot.blocked)
 	assignments, err := FindAssignments(ctx, graph, singleCycle, allowMutual)
 	if errors.Is(err, ErrNoAssignment) {
 		report.Error = "Нет распределения с выбранными настройками и направлениями доставки"
-		if _, relaxedErr := FindAssignments(ctx, graph, false, true); relaxedErr == nil {
+		if _, relaxedErr := FindAssignments(ctx, shipping, false, true); relaxedErr != nil {
+			report.Problems = append(report.Problems, shippingProblems(players, shipping, s.locations)...)
+		} else if _, relaxedErr := FindAssignments(ctx, graph, false, true); relaxedErr != nil {
+			report.Error = "Нет распределения с текущими запретами"
+			report.Problems = append(report.Problems, blockedProblems(players, shipping, graph)...)
+		} else {
 			switch {
 			case singleCycle && !allowMutual:
 				report.Problems = append(report.Problems, "Доставка возможна, но текущий состав не позволяет одновременно собрать одну цепочку и запретить взаимные пары. Ослабьте одно из правил.")
@@ -157,8 +168,6 @@ func (s *Service) prepare(ctx context.Context, snapshot drawSnapshot, force bool
 			case !allowMutual:
 				report.Problems = append(report.Problems, "Доставка возможна только с взаимными парами. Включите правило «Разрешить взаимные пары».")
 			}
-		} else {
-			report.Problems = append(report.Problems, shippingProblems(players, graph, s.locations)...)
 		}
 		return report, nil, nil
 	}
@@ -192,14 +201,19 @@ func drawnPlayers(members []player, report *Readiness) ([]player, string) {
 }
 
 func missingFields(p player) []string {
+	return missingProfile(store.User{Address: p.Address, Location: p.Location, Destinations: p.Destinations})
+}
+
+// missingProfile lists the questionnaire fields a member must fill to be drawn.
+func missingProfile(u store.User) []string {
 	result := []string{}
-	if strings.TrimSpace(p.Address) == "" {
+	if strings.TrimSpace(u.Address) == "" {
 		result = append(result, "Адрес")
 	}
-	if p.Location == "" {
+	if u.Location == "" {
 		result = append(result, "Местоположение")
 	}
-	if len(p.Destinations) == 0 {
+	if len(u.Destinations) == 0 {
 		result = append(result, "Направления отправки")
 	}
 	return result
@@ -223,6 +237,61 @@ func shippingGraph(players []player) Graph {
 		}
 	}
 	return graph
+}
+
+// withoutBlocked copies the graph without the pairs the organizer forbade.
+func withoutBlocked(graph Graph, players []player, blocked []store.BlockedPair) Graph {
+	result := Graph{PersonCount: graph.PersonCount, Edges: append([]bool(nil), graph.Edges...)}
+	index := map[int64]int64{}
+	for i, p := range players {
+		index[p.ID] = int64(i)
+	}
+	for _, pair := range blocked {
+		from, okFrom := index[pair.SenderID]
+		to, okTo := index[pair.ReceiverID]
+		if okFrom && okTo {
+			result.Edges[from*result.PersonCount+to] = false
+		}
+	}
+	return result
+}
+
+// blockedProblems names the players the forbidden pairs leave without a
+// receiver or without a santa although shipping alone would allow one.
+func blockedProblems(players []player, shipping, graph Graph) []string {
+	var problems []string
+	for from, p := range players {
+		before, after := 0, 0
+		for to := range players {
+			if shipping.HasEdge(int64(from), int64(to)) {
+				before++
+			}
+			if graph.HasEdge(int64(from), int64(to)) {
+				after++
+			}
+		}
+		if before > 0 && after == 0 {
+			problems = append(problems, fmt.Sprintf("%s не может никому дарить: все возможные получатели под запретом.", p.Name))
+		}
+	}
+	for to, p := range players {
+		before, after := 0, 0
+		for from := range players {
+			if shipping.HasEdge(int64(from), int64(to)) {
+				before++
+			}
+			if graph.HasEdge(int64(from), int64(to)) {
+				after++
+			}
+		}
+		if before > 0 && after == 0 {
+			problems = append(problems, fmt.Sprintf("%s остаётся без Санты: всем, кто может отправить подарок, это запрещено.", p.Name))
+		}
+	}
+	if len(problems) == 0 {
+		problems = append(problems, "Запретов слишком много: с ними нельзя распределить всех участников. Снимите часть запретов.")
+	}
+	return problems
 }
 
 func shippingProblems(players []player, graph Graph, locations map[string]string) []string {

@@ -29,7 +29,27 @@ func init() {
 		},
 		Down: func(ctx context.Context, db *bun.DB) error { return nil },
 	})
+	migrations.Add(migrate.Migration{
+		Name: "20261124000000",
+		Up: func(ctx context.Context, db *bun.DB) error {
+			return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+				_, err := tx.ExecContext(ctx, drawRulesSchema)
+				return err
+			})
+		},
+		Down: func(ctx context.Context, db *bun.DB) error { return nil },
+	})
 }
+
+// drawRulesSchema adds sender→receiver pairs the draw must not assign.
+const drawRulesSchema = `
+CREATE TABLE IF NOT EXISTS blocked_pairs (
+ game INTEGER NOT NULL REFERENCES games(id),
+ sender INTEGER NOT NULL REFERENCES users(id),
+ receiver INTEGER NOT NULL REFERENCES users(id),
+ PRIMARY KEY(game, sender, receiver),
+ CHECK(sender <> receiver)
+);`
 
 func New(sqldb *sql.DB) *bun.DB {
 	sqldb.SetMaxOpenConns(1)
@@ -75,7 +95,7 @@ func ResetEmptyTarget(ctx context.Context, db *bun.DB) error {
 		return err
 	}
 	defer db.ExecContext(ctx, "PRAGMA foreign_keys = ON")
-	for _, table := range []string{"message_reads", "deliveries", "messages", "assignments", "members", "games", "users", "bun_migration_locks", "bun_migrations"} {
+	for _, table := range []string{"blocked_pairs", "message_reads", "deliveries", "messages", "assignments", "members", "games", "users", "bun_migration_locks", "bun_migrations"} {
 		if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
 			return fmt.Errorf("drop %s: %w", table, err)
 		}

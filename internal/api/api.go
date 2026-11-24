@@ -54,6 +54,10 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("GET /api/games/{id}/announcements", s.json(s.announcements))
 	mux.Handle("POST /api/games/{id}/announcements", s.json(s.announce))
 	mux.Handle("GET /api/games/{id}/threads", s.json(s.threads))
+	mux.Handle("GET /api/games/{id}/members", s.json(s.members))
+	mux.Handle("DELETE /api/games/{id}/members/{user}", s.json(s.removeMember))
+	mux.Handle("POST /api/games/{id}/blocked", s.json(s.block))
+	mux.Handle("DELETE /api/games/{id}/blocked/{sender}/{receiver}", s.json(s.unblock))
 
 	mux.Handle("GET /api/invites/{token}", s.json(s.invite))
 	mux.Handle("POST /api/invites/{token}/join", s.json(s.join))
@@ -136,7 +140,7 @@ func (s *Server) security(next http.Handler) http.Handler {
 			if r.Header.Get("Origin") == s.origin {
 				w.Header().Set("Access-Control-Allow-Origin", s.origin)
 				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			}
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
@@ -205,6 +209,14 @@ func gameID(r *http.Request) (int64, error) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
 		return 0, badRequest("Некорректная игра")
+	}
+	return id, nil
+}
+
+func userID(r *http.Request, name string) (int64, error) {
+	id, err := strconv.ParseInt(r.PathValue(name), 10, 64)
+	if err != nil || id < 1 {
+		return 0, badRequest("Некорректный участник")
 	}
 	return id, nil
 }

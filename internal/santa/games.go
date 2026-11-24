@@ -22,6 +22,8 @@ type Game struct {
 	IsMember         bool   `json:"is_member"`
 	Count            int    `json:"count"`
 	InviteURL        string `json:"invite_url,omitempty"`
+	// Missing lists what the actor still has to fill in to be drawn.
+	Missing []string `json:"missing,omitempty"`
 }
 
 type CreateGame struct {
@@ -42,10 +44,13 @@ type Receiver struct {
 	Wishlist string `json:"wishlist"`
 }
 
-func (s *Service) toGame(v store.GameView, actor int64) Game {
+func (s *Service) toGame(v store.GameView, actor int64, missing []string) Game {
 	g := Game{ID: v.ID, Name: v.Name, CreatorName: v.CreatorName, SingleCycle: v.SingleCycle, AllowMutualPairs: v.AllowMutualPairs, Started: v.Started, Round: v.Round, IsOwner: v.CreatorID == actor, IsMember: v.IsMember, Count: v.MemberCount}
 	if g.IsOwner && s.botName != "" {
 		g.InviteURL = "https://t.me/" + s.botName + "?startapp=" + url.QueryEscape(v.Invite)
+	}
+	if g.IsMember && !g.Started && len(missing) > 0 {
+		g.Missing = missing
 	}
 	return g
 }
@@ -73,16 +78,29 @@ func (s *Service) Games(ctx context.Context, actor Actor) ([]Game, error) {
 	if err != nil {
 		return nil, err
 	}
+	missing, err := s.missing(ctx, actor.ID)
+	if err != nil {
+		return nil, err
+	}
 	result := make([]Game, 0, len(views))
 	for _, v := range views {
-		result = append(result, s.toGame(v, actor.ID))
+		result = append(result, s.toGame(v, actor.ID, missing))
 	}
 	return result, nil
 }
 
 func (s *Service) Game(ctx context.Context, actor Actor, id int64) (Game, error) {
 	g, err := gameFor(ctx, s.store, actor.ID, id)
-	return s.toGame(g, actor.ID), err
+	if err != nil {
+		return Game{}, err
+	}
+	missing, err := s.missing(ctx, actor.ID)
+	return s.toGame(g, actor.ID, missing), err
+}
+
+func (s *Service) missing(ctx context.Context, actor int64) ([]string, error) {
+	u, err := s.store.User(ctx, actor)
+	return missingProfile(u), err
 }
 
 func (s *Service) CreateGame(ctx context.Context, actor Actor, input CreateGame) (Game, error) {
@@ -97,7 +115,7 @@ func (s *Service) CreateGame(ctx context.Context, actor Actor, input CreateGame)
 			return err
 		}
 		g, err := tx.GameView(ctx, actor.ID, model.ID)
-		result = s.toGame(g, actor.ID)
+		result = s.toGame(g, actor.ID, nil)
 		return err
 	})
 	return result, err
@@ -128,7 +146,7 @@ func (s *Service) UpdateGame(ctx context.Context, actor Actor, id int64, input U
 		if err := tx.UpdateGame(ctx, &g.Game, "name", "single_cycle", "allow_mutual_pairs"); err != nil {
 			return err
 		}
-		result = s.toGame(g, actor.ID)
+		result = s.toGame(g, actor.ID, nil)
 		return nil
 	})
 	return result, err

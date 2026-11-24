@@ -79,6 +79,8 @@ var _ = Describe("API", func() {
 	It("tracks delivery, unread messages and announcements", func() { testDeliveryUnreadAndAnnouncementSummary(GinkgoT()) })
 	It("validates forced draws and uploads", func() { testForceDrawAndUploadValidation(GinkgoT()) })
 	It("assigns only drawn members when an excluded member sorts first", func() { testForceDrawSkipsExcludedMembers(GinkgoT()) })
+	It("respects and explains blocked pairs", func() { testBlockedPairs(GinkgoT()) })
+	It("removes members and reports missing questionnaires", func() { testRemoveMemberAndMissing(GinkgoT()) })
 })
 
 func signed(id int64, stamp int64) string {
@@ -503,4 +505,103 @@ func testForceDrawSkipsExcludedMembers(t FullGinkgoTInterface) {
 		pairs[sender] = receiver
 	}
 	Expect(pairs).To(Equal(map[int64]int64{2: 3, 3: 2}))
+}
+
+func testBlockedPairs(t FullGinkgoTInterface) {
+	db, err := sql.Open("sqliteshim", filepath.Join(t.TempDir(), "blocked.db"))
+	Expect(err).NotTo(HaveOccurred())
+	defer db.Close()
+	s, err := New(db, testToken, "https://test.example", "bot", t.TempDir(), map[string]string{"a": "A"}, nil)
+	Expect(err).NotTo(HaveOccurred())
+	h := s.Handler()
+	g := decodeResponse[game](t, requestJSON(h, 10, "POST", "/games", map[string]any{"name": "Blocked", "single_cycle": false, "allow_mutual_pairs": true}), 200)
+	token := strings.Split(g.InviteURL, "startapp=")[1]
+	path := fmt.Sprintf("/games/%d", g.ID)
+	for id := int64(1); id <= 4; id++ {
+		decodeResponse[any](t, requestJSON(h, id, "PUT", "/me", map[string]any{"address": "Address", "location": "a", "destinations": []string{"a"}}), 200)
+		decodeResponse[any](t, requestJSON(h, id, "POST", "/invites/"+token+"/join", map[string]any{}), 200)
+	}
+	decodeResponse[any](t, requestJSON(h, 1, "GET", path+"/members", nil), 403)
+	decodeResponse[any](t, requestJSON(h, 1, "POST", path+"/blocked", map[string]any{"sender": 2, "receiver": 1}), 403)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/blocked", map[string]any{"sender": 2, "receiver": 2}), 400)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/blocked", map[string]any{"sender": 2, "receiver": 99}), 400)
+	// User 1 is controversial: users 2, 3 and 4 refuse to give them a gift.
+	for _, sender := range []int{2, 3, 4} {
+		decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/blocked", map[string]any{"sender": sender, "receiver": 1}), 200)
+	}
+	members := decodeResponse[[]santa.GameMember](t, requestJSON(h, 10, "GET", path+"/members", nil), 200)
+	Expect(members).To(HaveLen(4))
+	Expect(members[1].Blocked).To(Equal([]int64{1}))
+	Expect(members[0].Blocked).To(BeEmpty())
+	report := decodeResponse[readinessResult](t, requestJSON(h, 10, "POST", path+"/readiness", map[string]any{}), 200)
+	Expect(report.Ready).To(BeFalse())
+	Expect(strings.Join(report.Problems, " ")).To(ContainSubstring("User 1 остаётся без Санты"))
+	decodeResponse[any](t, requestJSON(h, 10, "DELETE", path+"/blocked/4/1", nil), 200)
+	members = decodeResponse[[]santa.GameMember](t, requestJSON(h, 10, "GET", path+"/members", nil), 200)
+	Expect(members[3].Blocked).To(BeEmpty())
+	for range 10 {
+		report = decodeResponse[readinessResult](t, requestJSON(h, 10, "POST", path+"/readiness", map[string]any{}), 200)
+		Expect(report.Ready).To(BeTrue(), "report: %#v", report)
+	}
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/draw", map[string]any{}), 200)
+	var santaOfFirst int64
+	Expect(db.QueryRow(`SELECT sender FROM assignments WHERE game=? AND receiver=1`, g.ID).Scan(&santaOfFirst)).To(Succeed())
+	Expect(santaOfFirst).To(Equal(int64(4)))
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/blocked", map[string]any{"sender": 3, "receiver": 2}), 409)
+	decodeResponse[any](t, requestJSON(h, 10, "DELETE", path+"/blocked/2/1", nil), 409)
+	decodeResponse[any](t, requestJSON(h, 10, "DELETE", path+"/members/2", nil), 409)
+}
+
+func testRemoveMemberAndMissing(t FullGinkgoTInterface) {
+	db, err := sql.Open("sqliteshim", filepath.Join(t.TempDir(), "remove.db"))
+	Expect(err).NotTo(HaveOccurred())
+	defer db.Close()
+	var mu sync.Mutex
+	var notes []notification
+	notifier := notifierFunc(func(user int64, text string) {
+		mu.Lock()
+		defer mu.Unlock()
+		notes = append(notes, notification{user, text})
+	})
+	s, err := New(db, testToken, "https://test.example", "bot", t.TempDir(), map[string]string{"a": "A"}, notifier)
+	Expect(err).NotTo(HaveOccurred())
+	h := s.Handler()
+	g := decodeResponse[game](t, requestJSON(h, 10, "POST", "/games", map[string]any{"name": "Remove"}), 200)
+	token := strings.Split(g.InviteURL, "startapp=")[1]
+	path := fmt.Sprintf("/games/%d", g.ID)
+	for id := int64(1); id <= 4; id++ {
+		if id < 4 {
+			decodeResponse[any](t, requestJSON(h, id, "PUT", "/me", map[string]any{"address": "Address", "location": "a", "destinations": []string{"a"}}), 200)
+		}
+		decodeResponse[any](t, requestJSON(h, id, "POST", "/invites/"+token+"/join", map[string]any{}), 200)
+	}
+	// User 4 has not filled the questionnaire and is told so.
+	own := decodeResponse[game](t, requestJSON(h, 4, "GET", path, nil), 200)
+	Expect(own.Missing).To(Equal([]string{"Адрес", "Местоположение", "Направления отправки"}))
+	list := decodeResponse[[]game](t, requestJSON(h, 4, "GET", "/games", nil), 200)
+	Expect(list[0].Missing).To(HaveLen(3))
+	Expect(decodeResponse[game](t, requestJSON(h, 1, "GET", path, nil), 200).Missing).To(BeEmpty())
+	members := decodeResponse[[]santa.GameMember](t, requestJSON(h, 10, "GET", path+"/members", nil), 200)
+	Expect(members[3].Missing).To(HaveLen(3))
+	Expect(members[0].Missing).To(BeEmpty())
+
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/blocked", map[string]any{"sender": 1, "receiver": 3}), 200)
+	decodeResponse[any](t, requestJSON(h, 10, "POST", path+"/blocked", map[string]any{"sender": 3, "receiver": 2}), 200)
+	decodeResponse[any](t, requestJSON(h, 1, "DELETE", path+"/members/3", nil), 403)
+	decodeResponse[any](t, requestJSON(h, 10, "DELETE", path+"/members/3", nil), 200)
+	decodeResponse[any](t, requestJSON(h, 10, "DELETE", path+"/members/3", nil), 400)
+	decodeResponse[any](t, requestJSON(h, 3, "GET", path, nil), 403)
+	var blocked int
+	Expect(db.QueryRow(`SELECT count(*) FROM blocked_pairs WHERE game=?`, g.ID).Scan(&blocked)).To(Succeed())
+	Expect(blocked).To(BeZero())
+	Expect(decodeResponse[game](t, requestJSON(h, 10, "GET", path, nil), 200).Count).To(Equal(3))
+	Eventually(func() []notification {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]notification(nil), notes...)
+	}, time.Second).Should(ContainElement(notification{3, "Организатор исключил вас из игры «Remove»."}))
+	decodeResponse[any](t, requestJSON(h, 10, "DELETE", path+"/members/4", nil), 200)
+	ready := decodeResponse[readinessResult](t, requestJSON(h, 10, "POST", path+"/readiness", map[string]any{}), 200)
+	Expect(ready.Ready).To(BeTrue(), "report: %#v", ready)
+	Expect(ready.Members).To(HaveLen(2))
 }
