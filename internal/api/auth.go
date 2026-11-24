@@ -1,4 +1,4 @@
-package mini
+package api
 
 import (
 	"crypto/hmac"

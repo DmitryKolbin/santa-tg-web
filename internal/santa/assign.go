@@ -1,19 +1,27 @@
-package services
+package santa
 
 import (
 	"context"
 	"errors"
 	"math/rand/v2"
 	"time"
-
-	"github.com/DmitryKolbin/santa-tg-web/internal/santa"
 )
+
+// Graph is a directed adjacency matrix: an edge means the sender may give a
+// gift to the receiver.
+type Graph struct {
+	PersonCount int64
+	Edges       []bool
+}
+
+func (g *Graph) SetEdge(from, to int64)      { g.Edges[from*g.PersonCount+to] = true }
+func (g *Graph) HasEdge(from, to int64) bool { return g.Edges[from*g.PersonCount+to] }
 
 var ErrNoAssignment = errors.New("нет допустимого распределения")
 
 // FindAssignments returns receiver indices, indexed by sender. Candidate order is
 // randomized; this does not sample all valid assignments uniformly.
-func FindAssignments(ctx context.Context, graph santa.Graph, singleCycle, allowMutualPairs bool) ([]int, error) {
+func FindAssignments(ctx context.Context, graph Graph, singleCycle, allowMutualPairs bool) ([]int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	n := int(graph.PersonCount)
