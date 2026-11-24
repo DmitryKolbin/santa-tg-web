@@ -9,19 +9,3 @@ packages:
   github.com/DmitryKolbin/santa-tg-web/internal/mini:
     interfaces:
       HTTPClient:
-  github.com/DmitryKolbin/santa-tg-web/internal/santa/services:
-    interfaces:
-      Notifier:
-      MeService:
-      LocationService:
-      GameService:
-      InviteService:
-      ThreadService:
-      FileService:
-  github.com/DmitryKolbin/santa-tg-web/internal/santa/repos:
-    interfaces:
-      GameRepo:
-      UserRepo:
-      MessageRepo:
-      ImportRepo:
-      UnitOfWork:

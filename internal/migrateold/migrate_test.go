@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	appdb "github.com/DmitryKolbin/santa-tg-web/internal/database"
+	"github.com/DmitryKolbin/santa-tg-web/internal/store"
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/uptrace/bun"
@@ -31,7 +31,7 @@ func openDB(name string) *bun.DB {
 	db, err := sql.Open("sqliteshim", filepath.Join(ginkgo.GinkgoT().TempDir(), name))
 	Expect(err).NotTo(HaveOccurred())
 	ginkgo.DeferCleanup(db.Close)
-	return appdb.New(db)
+	return store.New(db)
 }
 
 var _ = ginkgo.Describe("Legacy database migration", func() {

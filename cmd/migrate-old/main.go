@@ -9,8 +9,8 @@ import (
 	"os"
 	"path/filepath"
 
-	appdb "github.com/DmitryKolbin/santa-tg-web/internal/database"
 	"github.com/DmitryKolbin/santa-tg-web/internal/migrateold"
+	"github.com/DmitryKolbin/santa-tg-web/internal/store"
 )
 
 func main() {
@@ -47,16 +47,16 @@ func main() {
 	}
 
 	sourceURL := (&url.URL{Scheme: "file", Path: sourcePath, RawQuery: "mode=ro"}).String()
-	source, err := appdb.Open(sourceURL)
+	source, err := store.Open(sourceURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer source.Close()
-	target, err := appdb.Open(targetPath)
+	target, err := store.Open(targetPath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	report, err := migrateold.Migrate(context.Background(), appdb.New(source), appdb.New(target))
+	report, err := migrateold.Migrate(context.Background(), store.New(source), store.New(target))
 	target.Close()
 	if err != nil {
 		if !targetExisted {

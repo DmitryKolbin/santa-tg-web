@@ -13,12 +13,10 @@ import (
 	"syscall"
 	"time"
 
-	appdb "github.com/DmitryKolbin/santa-tg-web/internal/database"
+	"github.com/DmitryKolbin/santa-tg-web/internal/api"
 	"github.com/DmitryKolbin/santa-tg-web/internal/mini"
-	"github.com/DmitryKolbin/santa-tg-web/internal/santa/controllers"
-	"github.com/DmitryKolbin/santa-tg-web/internal/santa/httpapi"
-	"github.com/DmitryKolbin/santa-tg-web/internal/santa/repos"
-	"github.com/DmitryKolbin/santa-tg-web/internal/santa/services"
+	"github.com/DmitryKolbin/santa-tg-web/internal/santa"
+	"github.com/DmitryKolbin/santa-tg-web/internal/store"
 )
 
 func env(key, fallback string) string {
@@ -44,13 +42,13 @@ func run() error {
 	if len(locations) == 0 {
 		return errors.New("locations cannot be empty")
 	}
-	db, err := appdb.Open(env("DB_PATH", "santa-mini.db"))
+	db, err := store.Open(env("DB_PATH", "santa-mini.db"))
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	bunDB := appdb.New(db)
-	if err := appdb.Migrate(context.Background(), bunDB); err != nil {
+	bunDB := store.New(db)
+	if err := store.Migrate(context.Background(), bunDB); err != nil {
 		return err
 	}
 	uploads := env("UPLOADS_PATH", "uploads")
@@ -64,37 +62,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	store := repos.New(bunDB)
-	meService := services.NewMeService(store, locations, bot)
-	locationService := services.NewLocationService(store, locations)
-	gameService := services.NewGameService(store, name, locations, bot)
-	inviteService := services.NewInviteService(store)
-	threadService := services.NewThreadService(store, uploads, bot)
-	fileService := services.NewFileService(store, uploads)
-	api := httpapi.New(token)
-	mux := http.NewServeMux()
-	routeControllers := []controllers.Controller{
-		controllers.NewMeController(api, meService),
-		controllers.NewLocationsController(api, locationService),
-		controllers.NewGamesController(api, gameService),
-		controllers.NewInvitesController(api, inviteService),
-		controllers.NewThreadsController(api, threadService),
-		controllers.NewFilesController(api, fileService),
-	}
-	for _, controller := range routeControllers {
-		controller.RegisterRoutes(mux)
-	}
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		pingCtx, cancel := context.WithTimeout(r.Context(), time.Second)
-		defer cancel()
-		if err := bunDB.PingContext(pingCtx); err != nil {
-			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
-			return
-		}
-		_, _ = w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "Not found", http.StatusNotFound) })
-	server := &http.Server{Addr: env("HTTP_ADDR", ":8080"), Handler: httpapi.Security(appURL, mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	svc := santa.New(store.NewStore(bunDB), santa.Options{Uploads: uploads, BotName: name, Locations: locations, Notifier: bot})
+	server := &http.Server{Addr: env("HTTP_ADDR", ":8080"), Handler: api.New(svc, token, appURL), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	botCtx, stopBot := context.WithCancel(context.Background())
 	defer stopBot()
 	go bot.Run(botCtx)

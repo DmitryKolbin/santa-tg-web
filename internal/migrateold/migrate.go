@@ -8,9 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/DmitryKolbin/santa-tg-web/internal/database"
-	"github.com/DmitryKolbin/santa-tg-web/internal/santa"
-	"github.com/DmitryKolbin/santa-tg-web/internal/santa/repos"
+	"github.com/DmitryKolbin/santa-tg-web/internal/store"
 	"github.com/uptrace/bun"
 )
 
@@ -53,34 +51,33 @@ func Migrate(ctx context.Context, source, target *bun.DB) (Report, error) {
 		return Report{}, err
 	}
 
-	if err := database.Migrate(ctx, target); err != nil {
-		_ = database.ResetEmptyTarget(ctx, target)
+	if err := store.Migrate(ctx, target); err != nil {
+		_ = store.ResetEmptyTarget(ctx, target)
 		return Report{}, err
 	}
 
 	report := Report{Users: len(people), Games: len(games), Members: members}
-	store := repos.New(target)
-	err = store.InTx(ctx, func(repositories repos.Repositories) error {
+	err = store.NewStore(target).Tx(ctx, func(tx *store.Store) error {
 		for _, p := range people {
-			u := &santa.User{ID: p.TelegramID, Name: p.Name, Address: p.Address, Wishlist: p.Wishlist, Location: p.Place, Destinations: santa.StringList(p.Destinations)}
-			if err := repositories.Import.User(ctx, u); err != nil {
+			u := &store.User{ID: p.TelegramID, Name: p.Name, Address: p.Address, Wishlist: p.Wishlist, Location: p.Place, Destinations: store.StringList(p.Destinations)}
+			if err := tx.InsertUser(ctx, u); err != nil {
 				return fmt.Errorf("import person %d: %w", p.ID, err)
 			}
 		}
 		for _, g := range games {
-			model := &santa.Game{ID: g.ID, Name: g.Name, CreatorID: peopleByID[g.Creator], Invite: randomKey(), SingleCycle: true, AllowMutualPairs: true, Started: g.Started, Round: 1}
-			if err := repositories.Import.Game(ctx, model); err != nil {
+			model := &store.Game{ID: g.ID, Name: g.Name, CreatorID: peopleByID[g.Creator], Invite: randomKey(), SingleCycle: true, AllowMutualPairs: true, Started: g.Started, Round: 1}
+			if err := tx.InsertGame(ctx, model); err != nil {
 				return fmt.Errorf("import game %d: %w", g.ID, err)
 			}
 			for _, oldID := range g.Members {
-				if err := repositories.Games.AddMember(ctx, g.ID, peopleByID[oldID]); err != nil {
+				if err := tx.AddMember(ctx, g.ID, peopleByID[oldID]); err != nil {
 					return fmt.Errorf("import member %d of game %d: %w", oldID, g.ID, err)
 				}
 			}
 			if g.Started {
 				for i, sender := range g.Route {
 					receiver := g.Route[(i+1)%len(g.Route)]
-					if err := repositories.Games.CreateAssignment(ctx, &santa.Assignment{Thread: randomKey(), GameID: g.ID, Round: 1, SenderID: peopleByID[sender], ReceiverID: peopleByID[receiver]}); err != nil {
+					if err := tx.CreateAssignment(ctx, &store.Assignment{Thread: randomKey(), GameID: g.ID, Round: 1, SenderID: peopleByID[sender], ReceiverID: peopleByID[receiver]}); err != nil {
 						return fmt.Errorf("import assignments of game %d: %w", g.ID, err)
 					}
 					report.Assignments++
@@ -90,10 +87,10 @@ func Migrate(ctx context.Context, source, target *bun.DB) (Report, error) {
 				report.ResetGames = append(report.ResetGames, g.ID)
 			}
 		}
-		return repositories.Import.Verify(ctx, map[string]int{"users": report.Users, "games": report.Games, "members": report.Members, "assignments": report.Assignments})
+		return tx.Verify(ctx, map[string]int{"users": report.Users, "games": report.Games, "members": report.Members, "assignments": report.Assignments})
 	})
 	if err != nil {
-		if resetErr := database.ResetEmptyTarget(ctx, target); resetErr != nil {
+		if resetErr := store.ResetEmptyTarget(ctx, target); resetErr != nil {
 			return Report{}, fmt.Errorf("%v; reset target: %w", err, resetErr)
 		}
 		return Report{}, err
