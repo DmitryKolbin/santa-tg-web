@@ -32,6 +32,14 @@ type Member struct {
 	PersonID      int64 `bun:"person,pk"`
 }
 
+// BlockedPair forbids the draw to assign Sender as the santa of Receiver.
+type BlockedPair struct {
+	bun.BaseModel `bun:"table:blocked_pairs,alias:bp"`
+	GameID        int64 `bun:"game,pk"`
+	SenderID      int64 `bun:"sender,pk"`
+	ReceiverID    int64 `bun:"receiver,pk"`
+}
+
 // Assignment is one sender→receiver pair of a draw round; its Thread key
 // identifies the anonymous conversation and the delivery of that pair.
 type Assignment struct {

@@ -198,3 +198,54 @@ func (s *Server) setReceived(r *http.Request, actor santa.Actor) (any, error) {
 	}
 	return s.svc.SetReceived(r.Context(), actor, r.PathValue("thread"), input)
 }
+
+func (s *Server) members(r *http.Request, actor santa.Actor) (any, error) {
+	id, err := gameID(r)
+	if err != nil {
+		return nil, err
+	}
+	return s.svc.Members(r.Context(), actor, id)
+}
+
+func (s *Server) removeMember(r *http.Request, actor santa.Actor) (any, error) {
+	id, err := gameID(r)
+	if err != nil {
+		return nil, err
+	}
+	user, err := userID(r, "user")
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.svc.RemoveMember(r.Context(), actor, id, user)
+}
+
+func (s *Server) block(r *http.Request, actor santa.Actor) (any, error) {
+	id, err := gameID(r)
+	if err != nil {
+		return nil, err
+	}
+	var input santa.BlockedPair
+	if err := decodeJSON(r, &input); err != nil {
+		return nil, err
+	}
+	if input.Sender < 1 || input.Receiver < 1 {
+		return nil, badRequest("Некорректный участник")
+	}
+	return nil, s.svc.Block(r.Context(), actor, id, input)
+}
+
+func (s *Server) unblock(r *http.Request, actor santa.Actor) (any, error) {
+	id, err := gameID(r)
+	if err != nil {
+		return nil, err
+	}
+	sender, err := userID(r, "sender")
+	if err != nil {
+		return nil, err
+	}
+	receiver, err := userID(r, "receiver")
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.svc.Unblock(r.Context(), actor, id, santa.BlockedPair{Sender: sender, Receiver: receiver})
+}
