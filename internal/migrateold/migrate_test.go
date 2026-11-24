@@ -87,6 +87,23 @@ INSERT INTO person_game VALUES(1,10),(2,10),(3,10),(1,20),(2,20),(3,30);
 		Expect(err).To(MatchError(ContainSubstring("duplicate telegram_id")))
 	})
 
+	ginkgo.It("resets a started game whose route omits a member", func() {
+		source, target := openDB("old.db"), openDB("new.db")
+		_, err := source.Exec(oldSchema + `
+INSERT INTO person(id,name,telegram_id) VALUES(1,'One',101),(2,'Two',102),(3,'Three',103);
+INSERT INTO game(id,name,status,creator_id,route) VALUES(10,'Incomplete','started',1,'[1,2]');
+INSERT INTO person_game VALUES(1,10),(2,10),(3,10);`)
+		Expect(err).NotTo(HaveOccurred())
+
+		report, err := Migrate(context.Background(), source, target)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(report.ResetGames).To(Equal([]int64{10}))
+		Expect(report.Assignments).To(BeZero())
+		var started int
+		Expect(target.QueryRow(`SELECT started FROM games WHERE id=10`).Scan(&started)).To(Succeed())
+		Expect(started).To(BeZero())
+	})
+
 	ginkgo.It("rejects a non-empty target", func() {
 		source, target := openDB("old.db"), openDB("new.db")
 		_, err := source.Exec(oldSchema)

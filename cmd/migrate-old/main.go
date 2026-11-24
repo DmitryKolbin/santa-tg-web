@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"flag"
 	"fmt"
 	"log"
@@ -12,7 +11,6 @@ import (
 
 	appdb "github.com/DmitryKolbin/santa-tg-web/internal/database"
 	"github.com/DmitryKolbin/santa-tg-web/internal/migrateold"
-	_ "github.com/uptrace/bun/driver/sqliteshim"
 )
 
 func main() {
@@ -49,12 +47,12 @@ func main() {
 	}
 
 	sourceURL := (&url.URL{Scheme: "file", Path: sourcePath, RawQuery: "mode=ro"}).String()
-	source, err := sql.Open("sqliteshim", sourceURL)
+	source, err := appdb.Open(sourceURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer source.Close()
-	target, err := sql.Open("sqliteshim", targetPath)
+	target, err := appdb.Open(targetPath)
 	if err != nil {
 		log.Fatal(err)
 	}

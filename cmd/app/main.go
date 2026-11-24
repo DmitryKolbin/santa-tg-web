@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -19,7 +19,6 @@ import (
 	"github.com/DmitryKolbin/santa-tg-web/internal/santa/httpapi"
 	"github.com/DmitryKolbin/santa-tg-web/internal/santa/repos"
 	"github.com/DmitryKolbin/santa-tg-web/internal/santa/services"
-	_ "github.com/uptrace/bun/driver/sqliteshim"
 )
 
 func env(key, fallback string) string {
@@ -45,7 +44,7 @@ func run() error {
 	if len(locations) == 0 {
 		return errors.New("locations cannot be empty")
 	}
-	db, err := sql.Open("sqliteshim", env("DB_PATH", "santa-mini.db"))
+	db, err := appdb.Open(env("DB_PATH", "santa-mini.db"))
 	if err != nil {
 		return err
 	}
@@ -96,21 +95,32 @@ func run() error {
 	})
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "Not found", http.StatusNotFound) })
 	server := &http.Server{Addr: env("HTTP_ADDR", ":8080"), Handler: httpapi.Security(appURL, mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
-	go bot.Run(ctx)
-	go func() {
-		<-ctx.Done()
+	botCtx, stopBot := context.WithCancel(context.Background())
+	defer stopBot()
+	go bot.Run(botCtx)
+	slog.Info("Secret Santa listening", "address", server.Addr)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.ListenAndServe() }()
+	select {
+	case err = <-serveErr:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdown); err != nil {
-			slog.Error("shutdown", "error", err)
+			_ = server.Close()
+			return fmt.Errorf("shutdown: %w", err)
 		}
-	}()
-	slog.Info("Secret Santa listening", "address", server.Addr)
-	err = server.ListenAndServe()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+		stopBot()
+		err = <-serveErr
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
 	}
-	return err
 }
 func main() {
 	if err := run(); err != nil {

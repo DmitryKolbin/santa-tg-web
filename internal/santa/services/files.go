@@ -23,7 +23,7 @@ func NewFileService(uow repos.UnitOfWork, uploads string) FileService {
 }
 
 func (s *fileService) Get(ctx context.Context, actor Actor, key string) (dto.Download, error) {
-	return execute(ctx, s.uow, actor, nil, s.uploads, func(repositories repos.Repositories, _ *effects) (dto.Download, error) {
+	return execute(ctx, s.uow, actor, nil, func(repositories repos.Repositories, _ *effects) (dto.Download, error) {
 		stored, err := repositories.Messages.GetFile(ctx, key)
 		if err != nil {
 			return dto.Download{}, err

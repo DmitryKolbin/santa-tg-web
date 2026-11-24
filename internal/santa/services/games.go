@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"reflect"
 
 	"github.com/DmitryKolbin/santa-tg-web/internal/santa"
 	"github.com/DmitryKolbin/santa-tg-web/internal/santa/dto"
@@ -16,6 +17,11 @@ type gameData struct {
 	dto.Game
 	Creator int64
 	Invite  string
+}
+
+type drawSnapshot struct {
+	game    gameData
+	players []Player
 }
 
 type gameReader interface {
@@ -66,7 +72,7 @@ func NewGameService(uow repos.UnitOfWork, botName string, locations map[string]s
 }
 
 func (s *gameService) List(ctx context.Context, actor Actor) ([]dto.Game, error) {
-	return execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, _ *effects) ([]dto.Game, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) ([]dto.Game, error) {
 		games, err := repositories.Games.List(ctx, actor.ID)
 		if err != nil {
 			return nil, err
@@ -80,14 +86,14 @@ func (s *gameService) List(ctx context.Context, actor Actor) ([]dto.Game, error)
 }
 
 func (s *gameService) Get(ctx context.Context, actor Actor, id int64) (dto.Game, error) {
-	return execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, _ *effects) (dto.Game, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) (dto.Game, error) {
 		g, err := loadGame(ctx, repositories.Games, actor.ID, id, s.botName)
 		return g.Game, err
 	})
 }
 
 func (s *gameService) Create(ctx context.Context, actor Actor, input dto.CreateGame) (dto.Game, error) {
-	return execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, _ *effects) (dto.Game, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) (dto.Game, error) {
 		name, err := checkedText(input.Name, 120)
 		if err != nil {
 			return dto.Game{}, err
@@ -102,7 +108,7 @@ func (s *gameService) Create(ctx context.Context, actor Actor, input dto.CreateG
 }
 
 func (s *gameService) Update(ctx context.Context, actor Actor, id int64, input dto.UpdateGame) (dto.Game, error) {
-	return execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, _ *effects) (dto.Game, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) (dto.Game, error) {
 		g, err := loadGame(ctx, repositories.Games, actor.ID, id, s.botName)
 		if err != nil {
 			return dto.Game{}, err
@@ -136,20 +142,29 @@ func (s *gameService) Update(ctx context.Context, actor Actor, id int64, input d
 	})
 }
 
-func (s *gameService) prepare(ctx context.Context, repositories repos.Repositories, g gameData, force bool) (dto.Readiness, []Player, []int, error) {
+func (s *gameService) loadDrawSnapshot(ctx context.Context, repositories repos.Repositories, actor Actor, id int64) (drawSnapshot, error) {
+	g, err := s.drawInput(ctx, repositories.Games, actor, id)
+	if err != nil {
+		return drawSnapshot{}, err
+	}
 	ids, err := repositories.Games.MemberIDs(ctx, g.ID)
 	if err != nil {
-		return dto.Readiness{}, nil, nil, err
+		return drawSnapshot{}, err
 	}
 	members := make([]Player, 0, len(ids))
 	for _, id := range ids {
 		user, _, err := readProfile(ctx, repositories.Users, id)
 		if err != nil {
-			return dto.Readiness{}, nil, nil, err
+			return drawSnapshot{}, err
 		}
 		members = append(members, Player{ID: user.ID, Name: user.Name, Address: user.Address, Wishlist: user.Wishlist, Location: user.Location, Destinations: []string(user.Destinations)})
 	}
-	return PrepareAssignments(ctx, DrawSettings{SingleCycle: g.SingleCycle, AllowMutualPairs: g.AllowMutualPairs}, members, force, s.locations)
+	return drawSnapshot{game: g, players: members}, nil
+}
+
+func (s *gameService) prepare(ctx context.Context, snapshot drawSnapshot, force bool) (dto.Readiness, []int, error) {
+	report, _, assignments, err := PrepareAssignments(ctx, DrawSettings{SingleCycle: snapshot.game.SingleCycle, AllowMutualPairs: snapshot.game.AllowMutualPairs}, snapshot.players, force, s.locations)
+	return report, assignments, err
 }
 
 func (s *gameService) drawInput(ctx context.Context, games repos.GameRepo, actor Actor, id int64) (gameData, error) {
@@ -167,14 +182,14 @@ func (s *gameService) drawInput(ctx context.Context, games repos.GameRepo, actor
 }
 
 func (s *gameService) CheckReadiness(ctx context.Context, actor Actor, id int64, input dto.DrawGame) (dto.Readiness, error) {
-	return execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, _ *effects) (dto.Readiness, error) {
-		g, err := s.drawInput(ctx, repositories.Games, actor, id)
-		if err != nil {
-			return dto.Readiness{}, err
-		}
-		result, _, _, err := s.prepare(ctx, repositories, g, input.Force)
-		return result, err
+	snapshot, err := execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) (drawSnapshot, error) {
+		return s.loadDrawSnapshot(ctx, repositories, actor, id)
 	})
+	if err != nil {
+		return dto.Readiness{}, err
+	}
+	result, _, err := s.prepare(ctx, snapshot, input.Force)
+	return result, err
 }
 
 func notifyMembers(ctx context.Context, games repos.GameRepo, e *effects, game int64, text string) error {
@@ -189,23 +204,33 @@ func notifyMembers(ctx context.Context, games repos.GameRepo, e *effects, game i
 }
 
 func (s *gameService) Draw(ctx context.Context, actor Actor, id int64, input dto.DrawGame) (dto.Readiness, error) {
-	return execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, e *effects) (dto.Readiness, error) {
-		g, err := s.drawInput(ctx, repositories.Games, actor, id)
+	snapshot, err := execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) (drawSnapshot, error) {
+		return s.loadDrawSnapshot(ctx, repositories, actor, id)
+	})
+	if err != nil {
+		return dto.Readiness{}, err
+	}
+	report, assignments, err := s.prepare(ctx, snapshot, input.Force)
+	if err != nil {
+		return dto.Readiness{}, err
+	}
+	if !report.Ready {
+		return dto.Readiness{}, Error{Status: 422, Text: report.Error}
+	}
+	if input.Force && input.Exclusions != report.Exclusions {
+		return dto.Readiness{}, Error{Status: 409, Text: "Список исключений изменился. Проверьте готовность и подтвердите запуск ещё раз."}
+	}
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, e *effects) (dto.Readiness, error) {
+		current, err := s.loadDrawSnapshot(ctx, repositories, actor, id)
 		if err != nil {
 			return dto.Readiness{}, err
 		}
-		report, players, assignments, err := s.prepare(ctx, repositories, g, input.Force)
-		if err != nil {
-			return dto.Readiness{}, err
+		if !reflect.DeepEqual(current, snapshot) {
+			return dto.Readiness{}, Error{Status: 409, Text: "Состав игры или анкеты изменились. Проверьте готовность и запустите жеребьёвку ещё раз."}
 		}
-		if !report.Ready {
-			return dto.Readiness{}, Error{Status: 422, Text: report.Error}
-		}
-		if input.Force && input.Exclusions != report.Exclusions {
-			return dto.Readiness{}, Error{Status: 409, Text: "Список исключений изменился. Проверьте готовность и подтвердите запуск ещё раз."}
-		}
+		g := current.game
 		for from, to := range assignments {
-			if err := repositories.Games.CreateAssignment(ctx, &santa.Assignment{Thread: randomKey(), GameID: g.ID, Round: g.Round, SenderID: players[from].ID, ReceiverID: players[to].ID}); err != nil {
+			if err := repositories.Games.CreateAssignment(ctx, &santa.Assignment{Thread: randomKey(), GameID: g.ID, Round: g.Round, SenderID: current.players[from].ID, ReceiverID: current.players[to].ID}); err != nil {
 				return dto.Readiness{}, err
 			}
 		}
@@ -218,7 +243,7 @@ func (s *gameService) Draw(ctx context.Context, actor Actor, id int64, input dto
 }
 
 func (s *gameService) Reset(ctx context.Context, actor Actor, id int64) error {
-	_, err := execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, e *effects) (struct{}, error) {
+	_, err := execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, e *effects) (struct{}, error) {
 		g, err := loadGame(ctx, repositories.Games, actor.ID, id, s.botName)
 		if err != nil {
 			return struct{}{}, err
@@ -238,7 +263,7 @@ func (s *gameService) Reset(ctx context.Context, actor Actor, id int64) error {
 }
 
 func (s *gameService) Receiver(ctx context.Context, actor Actor, id int64) (dto.Receiver, error) {
-	return execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, _ *effects) (dto.Receiver, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) (dto.Receiver, error) {
 		g, err := loadGame(ctx, repositories.Games, actor.ID, id, s.botName)
 		if err != nil {
 			return dto.Receiver{}, err
@@ -277,7 +302,7 @@ func messages(ctx context.Context, repository repos.MessageRepo, actor, game int
 }
 
 func (s *gameService) Announcements(ctx context.Context, actor Actor, id, after int64) ([]dto.Message, error) {
-	return execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, _ *effects) ([]dto.Message, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) ([]dto.Message, error) {
 		g, err := loadGame(ctx, repositories.Games, actor.ID, id, s.botName)
 		if err != nil {
 			return nil, err
@@ -287,7 +312,7 @@ func (s *gameService) Announcements(ctx context.Context, actor Actor, id, after 
 }
 
 func (s *gameService) LatestAnnouncement(ctx context.Context, actor Actor, id int64) (dto.AnnouncementSummary, error) {
-	return execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, _ *effects) (dto.AnnouncementSummary, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) (dto.AnnouncementSummary, error) {
 		g, err := loadGame(ctx, repositories.Games, actor.ID, id, s.botName)
 		if err != nil {
 			return dto.AnnouncementSummary{}, err
@@ -307,7 +332,7 @@ func (s *gameService) LatestAnnouncement(ctx context.Context, actor Actor, id in
 }
 
 func (s *gameService) Announce(ctx context.Context, actor Actor, id int64, input dto.Announcement) error {
-	_, err := execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, e *effects) (struct{}, error) {
+	_, err := execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, e *effects) (struct{}, error) {
 		g, err := loadGame(ctx, repositories.Games, actor.ID, id, s.botName)
 		if err != nil {
 			return struct{}{}, err

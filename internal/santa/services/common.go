@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/DmitryKolbin/santa-tg-web/internal/santa/repos"
@@ -38,14 +36,13 @@ type notification struct {
 
 type effects struct {
 	notifications []notification
-	files         []string
 }
 
 func (e *effects) notify(user int64, text string) {
 	e.notifications = append(e.notifications, notification{user: user, text: text})
 }
 
-func execute[T any](ctx context.Context, uow repos.UnitOfWork, actor Actor, notifier Notifier, uploads string, operation func(repos.Repositories, *effects) (T, error)) (result T, err error) {
+func execute[T any](ctx context.Context, uow repos.UnitOfWork, actor Actor, notifier Notifier, operation func(repos.Repositories, *effects) (T, error)) (result T, err error) {
 	e := &effects{}
 	err = uow.InTx(ctx, func(repositories repos.Repositories) error {
 		if err := repositories.Users.Ensure(ctx, actor.ID, actor.Name); err != nil {
@@ -55,9 +52,6 @@ func execute[T any](ctx context.Context, uow repos.UnitOfWork, actor Actor, noti
 		return err
 	})
 	if err != nil {
-		for _, key := range e.files {
-			_ = os.Remove(filepath.Join(uploads, key))
-		}
 		return result, err
 	}
 	if notifier != nil {

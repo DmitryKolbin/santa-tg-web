@@ -21,7 +21,7 @@ func NewLocationService(uow repos.UnitOfWork, locations map[string]string) Locat
 }
 
 func (s *locationService) List(ctx context.Context, actor Actor) (dto.Locations, error) {
-	return execute(ctx, s.uow, actor, nil, "", func(_ repos.Repositories, _ *effects) (dto.Locations, error) {
+	return execute(ctx, s.uow, actor, nil, func(_ repos.Repositories, _ *effects) (dto.Locations, error) {
 		return dto.Locations(s.locations), nil
 	})
 }

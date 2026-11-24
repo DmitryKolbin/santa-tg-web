@@ -208,7 +208,7 @@ func validRoute(g game, people map[int64]int64) bool {
 		}
 		seen[id] = true
 	}
-	return len(seen) >= 2
+	return len(seen) >= 2 && len(seen) == len(members)
 }
 
 func randomKey() string {

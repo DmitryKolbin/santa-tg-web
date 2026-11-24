@@ -6,25 +6,15 @@ Go API and Telegram bot for the Secret Santa Mini App. The frontend lives in a s
 
 Requirements: a Telegram bot token, a public HTTPS frontend URL, and an HTTPS reverse proxy forwarding the API domain to `127.0.0.1:8080`.
 
-Copy `.env.example` to `.env` and fill in:
-
-| Variable | Value |
-| --- | --- |
-| `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
-| `APP_URL` | Full Pages URL, for example `https://user.github.io/santa-tg-frontend/` |
-| `HTTP_HOST` | Published interface; defaults to `127.0.0.1` |
-| `HTTP_PORT` | Published port; defaults to `8080` |
-
-```sh
-docker compose config --quiet
-docker compose up --build -d
-```
+Build the image from `Dockerfile`, provide `TELEGRAM_BOT_TOKEN` and `APP_URL`,
+publish container port 8080 only on `127.0.0.1`, and mount persistent storage at
+`/data`. The container image supplies the remaining runtime defaults.
 
 Configure your existing nginx, Caddy, Traefik, or other HTTPS proxy to forward the API domain to `http://127.0.0.1:8080`. Do not add Basic Auth because the API authenticates signed Telegram data through the `Authorization` header.
 
 The backend permits browser API requests only from the origin of `APP_URL`. For `https://user.github.io/repo/`, the allowed origin is `https://user.github.io`.
 
-Check `https://<api-domain>/healthz` for `ok`. The bot configures its menu button with `APP_URL` and uses long polling, so its webhook must be disabled. SQLite and attachments are stored in the `santa-data` volume; run one application instance.
+Check `https://<api-domain>/healthz` for `ok`. The bot configures its menu button with `APP_URL` and uses long polling, so its webhook must be disabled. SQLite and attachments are stored under `/data`; run one application instance.
 
 ## Development
 

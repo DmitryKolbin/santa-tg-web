@@ -55,7 +55,7 @@ func loadThread(ctx context.Context, messages repos.MessageRepo, actor int64, ke
 }
 
 func (s *threadService) List(ctx context.Context, actor Actor, gameID int64) ([]dto.Thread, error) {
-	return execute(ctx, s.uow, actor, s.notifier, s.uploads, func(repositories repos.Repositories, _ *effects) ([]dto.Thread, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) ([]dto.Thread, error) {
 		g, err := loadGame(ctx, repositories.Games, actor.ID, gameID, "")
 		if err != nil {
 			return nil, err
@@ -81,8 +81,61 @@ func messageFromDetails(details projections.MessageDetails) dto.Message {
 	return dto.Message{ID: details.ID, Text: details.Text, Mine: details.Mine, FileKey: details.FileKey, FileName: details.FileName, FileType: details.FileType, Created: details.Created}
 }
 
+type stagedFile struct {
+	key, name, mime string
+}
+
+func (s *threadService) stageFile(upload *dto.Upload) (stagedFile, error) {
+	if upload == nil {
+		return stagedFile{}, nil
+	}
+	if upload.Size > 20<<20 {
+		return stagedFile{}, bad("Файл больше 20 МБ")
+	}
+	var sniff [512]byte
+	n, err := upload.Reader.Read(sniff[:])
+	if err != nil && err != io.EOF {
+		return stagedFile{}, err
+	}
+	mimeType := http.DetectContentType(sniff[:n])
+	if _, err := upload.Reader.Seek(0, 0); err != nil {
+		return stagedFile{}, err
+	}
+	name := filepath.Base(strings.ReplaceAll(upload.Name, "\\", "/"))
+	if len([]rune(name)) > 200 {
+		return stagedFile{}, bad("Слишком длинное имя файла")
+	}
+	if !strings.HasPrefix(mimeType, "image/") && !strings.HasPrefix(mimeType, "video/") && !strings.HasPrefix(mimeType, "audio/") || mimeType == "image/svg+xml" {
+		mimeType = "application/octet-stream"
+	}
+	file := stagedFile{key: randomKey(), name: name, mime: mimeType}
+	dst, err := os.OpenFile(filepath.Join(s.uploads, file.key), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return stagedFile{}, err
+	}
+	size, copyErr := io.Copy(dst, io.LimitReader(upload.Reader, (20<<20)+1))
+	closeErr := dst.Close()
+	if copyErr != nil {
+		_ = os.Remove(filepath.Join(s.uploads, file.key))
+		return stagedFile{}, copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(filepath.Join(s.uploads, file.key))
+		return stagedFile{}, closeErr
+	}
+	if size > 20<<20 {
+		_ = os.Remove(filepath.Join(s.uploads, file.key))
+		return stagedFile{}, bad("Файл больше 20 МБ")
+	}
+	if size == 0 {
+		_ = os.Remove(filepath.Join(s.uploads, file.key))
+		return stagedFile{}, bad("Файл пуст")
+	}
+	return file, nil
+}
+
 func (s *threadService) Messages(ctx context.Context, actor Actor, key string, after int64) ([]dto.Message, error) {
-	return execute(ctx, s.uow, actor, s.notifier, s.uploads, func(repositories repos.Repositories, _ *effects) ([]dto.Message, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) ([]dto.Message, error) {
 		t, err := loadThread(ctx, repositories.Messages, actor.ID, key)
 		if err != nil {
 			return nil, err
@@ -105,78 +158,59 @@ func (s *threadService) Messages(ctx context.Context, actor Actor, key string, a
 }
 
 func (s *threadService) Send(ctx context.Context, actor Actor, key string, input dto.SendMessage) error {
-	_, err := execute(ctx, s.uow, actor, s.notifier, s.uploads, func(repositories repos.Repositories, e *effects) (struct{}, error) {
+	expected, err := execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) (threadData, error) {
+		t, err := loadThread(ctx, repositories.Messages, actor.ID, key)
+		if err == nil && t.ReadOnly {
+			err = Error{Status: 409, Text: "Этот диалог доступен только для чтения"}
+		}
+		return t, err
+	})
+	if err != nil {
+		return err
+	}
+	text := strings.TrimSpace(input.Text)
+	if len([]rune(text)) > 4000 {
+		return bad("Сообщение — до 4000 символов")
+	}
+	file, err := s.stageFile(input.File)
+	if err != nil {
+		return err
+	}
+	if text == "" && file.key == "" {
+		return bad("Введите сообщение или выберите файл")
+	}
+	committed := false
+	if file.key != "" {
+		defer func() {
+			if !committed {
+				_ = os.Remove(filepath.Join(s.uploads, file.key))
+			}
+		}()
+	}
+	_, err = execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, e *effects) (struct{}, error) {
 		t, err := loadThread(ctx, repositories.Messages, actor.ID, key)
 		if err != nil {
 			return struct{}{}, err
 		}
-		if t.ReadOnly {
-			return struct{}{}, Error{Status: 409, Text: "Этот диалог доступен только для чтения"}
-		}
-		text := strings.TrimSpace(input.Text)
-		if len([]rune(text)) > 4000 {
-			return struct{}{}, bad("Сообщение — до 4000 символов")
-		}
-		fileKey, fileName, fileType := "", "", ""
-		if input.File != nil {
-			if input.File.Size > 20<<20 {
-				return struct{}{}, bad("Файл больше 20 МБ")
-			}
-			var sniff [512]byte
-			n, err := input.File.Reader.Read(sniff[:])
-			if err != nil && err != io.EOF {
-				return struct{}{}, err
-			}
-			fileType = http.DetectContentType(sniff[:n])
-			if _, err := input.File.Reader.Seek(0, 0); err != nil {
-				return struct{}{}, err
-			}
-			fileName = filepath.Base(strings.ReplaceAll(input.File.Name, "\\", "/"))
-			if len([]rune(fileName)) > 200 {
-				return struct{}{}, bad("Слишком длинное имя файла")
-			}
-			if !strings.HasPrefix(fileType, "image/") && !strings.HasPrefix(fileType, "video/") && !strings.HasPrefix(fileType, "audio/") || fileType == "image/svg+xml" {
-				fileType = "application/octet-stream"
-			}
-			fileKey = randomKey()
-			e.files = append(e.files, fileKey)
-			dst, err := os.OpenFile(filepath.Join(s.uploads, fileKey), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-			if err != nil {
-				return struct{}{}, err
-			}
-			size, copyErr := io.Copy(dst, io.LimitReader(input.File.Reader, (20<<20)+1))
-			closeErr := dst.Close()
-			if copyErr != nil {
-				return struct{}{}, copyErr
-			}
-			if closeErr != nil {
-				return struct{}{}, closeErr
-			}
-			if size > 20<<20 {
-				return struct{}{}, bad("Файл больше 20 МБ")
-			}
-			if size == 0 {
-				return struct{}{}, bad("Файл пуст")
-			}
-		}
-		if text == "" && fileKey == "" {
-			return struct{}{}, bad("Введите сообщение или выберите файл")
+		if t.ReadOnly || t != expected {
+			return struct{}{}, Error{Status: 409, Text: "Состояние диалога изменилось. Повторите отправку."}
 		}
 		receiver := t.Receiver
 		if actor.ID == receiver {
 			receiver = t.Sender
 		}
-		if err := repositories.Messages.Create(ctx, &santa.Message{Thread: &t.Key, GameID: t.Game, Round: t.Round, SenderID: actor.ID, ReceiverID: &receiver, Text: text, FileKey: fileKey, FileName: fileName, FileType: fileType}); err != nil {
+		if err := repositories.Messages.Create(ctx, &santa.Message{Thread: &t.Key, GameID: t.Game, Round: t.Round, SenderID: actor.ID, ReceiverID: &receiver, Text: text, FileKey: file.key, FileName: file.name, FileType: file.mime}); err != nil {
 			return struct{}{}, err
 		}
 		e.notify(receiver, "Новое сообщение в Secret Santa. Откройте приложение, чтобы прочитать.")
 		return struct{}{}, nil
 	})
+	committed = err == nil
 	return err
 }
 
 func (s *threadService) SaveTracking(ctx context.Context, actor Actor, key string, input dto.SaveTracking) (dto.Tracking, error) {
-	return execute(ctx, s.uow, actor, s.notifier, s.uploads, func(repositories repos.Repositories, e *effects) (dto.Tracking, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, e *effects) (dto.Tracking, error) {
 		t, err := loadThread(ctx, repositories.Messages, actor.ID, key)
 		if err != nil {
 			return dto.Tracking{}, err
@@ -212,7 +246,7 @@ func (s *threadService) SaveTracking(ctx context.Context, actor Actor, key strin
 }
 
 func (s *threadService) SetReceived(ctx context.Context, actor Actor, key string, input dto.SetReceived) (dto.Received, error) {
-	return execute(ctx, s.uow, actor, s.notifier, s.uploads, func(repositories repos.Repositories, e *effects) (dto.Received, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, e *effects) (dto.Received, error) {
 		t, err := loadThread(ctx, repositories.Messages, actor.ID, key)
 		if err != nil {
 			return dto.Received{}, err

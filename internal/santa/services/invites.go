@@ -17,7 +17,7 @@ type inviteService struct{ uow repos.UnitOfWork }
 func NewInviteService(uow repos.UnitOfWork) InviteService { return &inviteService{uow: uow} }
 
 func (s *inviteService) Get(ctx context.Context, actor Actor, token string) (dto.Invite, error) {
-	return execute(ctx, s.uow, actor, nil, "", func(repositories repos.Repositories, _ *effects) (dto.Invite, error) {
+	return execute(ctx, s.uow, actor, nil, func(repositories repos.Repositories, _ *effects) (dto.Invite, error) {
 		details, err := repositories.Games.GetByInvite(ctx, actor.ID, token)
 		g := gameFromDetails(details, actor.ID, "")
 		return dto.Invite{ID: g.ID, Name: g.Name, CreatorName: g.CreatorName, Started: g.Started, IsMember: g.IsMember}, err
@@ -25,7 +25,7 @@ func (s *inviteService) Get(ctx context.Context, actor Actor, token string) (dto
 }
 
 func (s *inviteService) Join(ctx context.Context, actor Actor, token string) (dto.GameID, error) {
-	return execute(ctx, s.uow, actor, nil, "", func(repositories repos.Repositories, _ *effects) (dto.GameID, error) {
+	return execute(ctx, s.uow, actor, nil, func(repositories repos.Repositories, _ *effects) (dto.GameID, error) {
 		details, err := repositories.Games.GetByInvite(ctx, actor.ID, token)
 		if err != nil {
 			return dto.GameID{}, err

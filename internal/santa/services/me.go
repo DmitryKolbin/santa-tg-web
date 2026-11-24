@@ -23,14 +23,14 @@ func NewMeService(uow repos.UnitOfWork, locations map[string]string, notifier No
 }
 
 func (s *meService) Get(ctx context.Context, actor Actor) (dto.Profile, error) {
-	return execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, _ *effects) (dto.Profile, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, _ *effects) (dto.Profile, error) {
 		_, profile, err := readProfile(ctx, repositories.Users, actor.ID)
 		return profile, err
 	})
 }
 
 func (s *meService) Save(ctx context.Context, actor Actor, input dto.SaveProfile) (dto.Profile, error) {
-	return execute(ctx, s.uow, actor, s.notifier, "", func(repositories repos.Repositories, e *effects) (dto.Profile, error) {
+	return execute(ctx, s.uow, actor, s.notifier, func(repositories repos.Repositories, e *effects) (dto.Profile, error) {
 		user, message, err := NormalizeProfile(actor.ID, input, s.locations)
 		if err != nil {
 			return dto.Profile{}, bad(message)
